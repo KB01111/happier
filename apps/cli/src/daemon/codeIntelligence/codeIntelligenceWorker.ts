@@ -1,0 +1,287 @@
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
+
+import {
+  redactCodeIntelligenceSettingsSecrets,
+  type CodeIntelligenceAnalysisProviderV1,
+  type CodeIntelligenceCommitAnalyzeResponseV1,
+  type CodeIntelligenceRepositoryRegisterResponseV1,
+  type CodeIntelligenceSettingsV1,
+  type CodeIntelligenceSnapshotRequestV1,
+  type CodeIntelligenceSnapshotResponseV1,
+  type CodeIntelligenceWorkerStatusV1,
+} from '@happier-dev/protocol';
+
+import type { ObservedProcess } from '@/backends/directSessions/processMatch';
+import { startSingleFlightIntervalLoop, type SingleFlightIntervalLoopHandle } from '@/daemon/lifecycle/singleFlightIntervalLoop';
+import { logger } from '@/ui/logger';
+
+import { analyzeCommit } from './analysis/analyzeCommit';
+import { observeCheckout } from './commits/observeCheckout';
+import type { ObservedCheckout } from './git/observedGit';
+import { sweepExternalSessions, type ObservedSessionProvider } from './sessions/sweepExternalSessions';
+import { openCodeIntelligenceStore, type CodeIntelligenceStore } from './store/codeIntelligenceStore';
+
+/**
+ * Observation cadence. Provider session stores expose no change notification through the
+ * direct-sessions owner, so sessions are swept; checkouts are also re-read on this cadence as the
+ * backstop for git-dir watch events the platform drops. Each sweep reads a bounded number of
+ * provider entries and runs a handful of read-only git commands per known worktree.
+ */
+const SWEEP_INTERVAL_MS = 30_000;
+/** Coalesces the burst of reflog writes one git operation produces into one reconcile. */
+const WATCH_DEBOUNCE_MS = 750;
+/** Analyses per tick; one request at a time keeps provider concurrency at one per machine. */
+const MAX_ANALYSES_PER_TICK = 5;
+const PRUNE_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const DEFAULT_SNAPSHOT_EVENTS = 200;
+const DEFAULT_SNAPSHOT_COMMITS = 50;
+
+export type CodeIntelligenceWorkerDeps = Readonly<{
+  dbPath: string;
+  readSettings: () => Promise<CodeIntelligenceSettingsV1>;
+  writeSettings: (raw: unknown) => Promise<CodeIntelligenceSettingsV1>;
+  resolveApiKey: (provider: CodeIntelligenceAnalysisProviderV1) => Promise<string | null>;
+  resolveSessionProviders: () => Promise<ObservedSessionProvider[]>;
+  listProcesses: () => Promise<ObservedProcess[]>;
+  /** Watches one directory (non-recursively); returns a closer, or null when watching failed. */
+  watchDirectory: (path: string, onChange: () => void) => (() => void) | null;
+  fetchImpl: typeof fetch;
+  nowMs: () => number;
+  sweepIntervalMs?: number;
+}>;
+
+export type CodeIntelligenceWorkerHandle = Readonly<{
+  getStatus: () => CodeIntelligenceWorkerStatusV1;
+  getSnapshot: (request: CodeIntelligenceSnapshotRequestV1) => CodeIntelligenceSnapshotResponseV1;
+  registerRepository: (path: string) => Promise<CodeIntelligenceRepositoryRegisterResponseV1>;
+  requestCommitAnalysis: (input: Readonly<{ repositoryId: string; sha: string }>) => Promise<CodeIntelligenceCommitAnalyzeResponseV1>;
+  getSettings: () => CodeIntelligenceSettingsV1;
+  setSettings: (raw: unknown) => Promise<CodeIntelligenceSettingsV1>;
+  /** Runs one full observation pass now; used by tests and explicit refreshes. */
+  runOnce: () => Promise<void>;
+  stop: () => Promise<void>;
+}>;
+
+const DISABLED_RESPONSE = { ok: false, errorCode: 'code_intelligence_disabled', error: 'Code intelligence is disabled' } as const;
+
+/**
+ * The daemon's single owner of code-intelligence lifecycle. It runs only while enabled, owns the
+ * store and git-dir watchers, and serializes every store mutation through one work chain so
+ * watcher events, sweeps and RPC requests never race on the same worktree.
+ */
+export async function startCodeIntelligenceWorker(deps: CodeIntelligenceWorkerDeps): Promise<CodeIntelligenceWorkerHandle> {
+  let settings = await deps.readSettings();
+  let store: CodeIntelligenceStore | null = null;
+  let loop: SingleFlightIntervalLoopHandle | null = null;
+  let stopped = false;
+  let state: CodeIntelligenceWorkerStatusV1['state'] = 'disabled';
+  let lastSweepAtMs: number | null = null;
+  let lastError: string | null = null;
+  let lastPruneAtMs = 0;
+  let chain: Promise<unknown> = Promise.resolve();
+  const watchers = new Map<string, () => void>();
+  const debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  const workingDirectoryCache = new Map<string, string | null>();
+  const unavailableUntilMsByProviderId = new Map<string, number>();
+
+  const serialize = <T>(task: () => Promise<T>): Promise<T> => {
+    const run = chain.then(task, task);
+    chain = run.catch(() => undefined);
+    return run;
+  };
+
+  const recordError = (context: string, error: unknown) => {
+    lastError = `${context}: ${error instanceof Error ? error.message : String(error)}`;
+    logger.warn(`[codeIntelligence] ${context}`, error);
+  };
+
+  const plausibleSessionIdsFor = (activeStore: CodeIntelligenceStore) => (worktreePath: string) =>
+    activeStore.listSessions()
+      .filter((session) => session.worktreePath === worktreePath && (session.status === 'running' || session.status === 'active_recently'))
+      .map((session) => session.id);
+
+  const ensureWatcher = (checkout: ObservedCheckout) => {
+    if (watchers.has(checkout.worktreePath)) return;
+    // The worktree's own reflog is appended on every commit, checkout, merge and reset.
+    const logsDir = join(checkout.gitDirPath, 'logs');
+    const target = existsSync(logsDir) ? logsDir : checkout.gitDirPath;
+    const close = deps.watchDirectory(target, () => {
+      const pending = debounceTimers.get(checkout.worktreePath);
+      if (pending) clearTimeout(pending);
+      debounceTimers.set(checkout.worktreePath, setTimeout(() => {
+        debounceTimers.delete(checkout.worktreePath);
+        void serialize(async () => {
+          await observeWorktree(checkout.worktreePath, 'session');
+          await drainAnalysisQueue();
+        }).catch((error) => recordError('reconcile after git change failed', error));
+      }, WATCH_DEBOUNCE_MS));
+    });
+    if (close) watchers.set(checkout.worktreePath, close);
+    else recordError('watch unavailable', new Error(`could not watch ${target}; relying on periodic reconcile`));
+  };
+
+  const observeWorktree = async (cwd: string, source: 'session' | 'manual'): Promise<ObservedCheckout | null> => {
+    if (!store) return null;
+    const result = await observeCheckout({
+      store,
+      cwd,
+      registrationSource: source,
+      excludedPathPrefixes: settings.excludedPathPrefixes,
+      resolvePlausibleSessionIds: plausibleSessionIdsFor(store),
+      nowMs: deps.nowMs,
+    });
+    if (result) ensureWatcher(result.checkout);
+    return result?.checkout ?? null;
+  };
+
+  const drainAnalysisQueue = async () => {
+    if (!store) return;
+    const now = deps.nowMs();
+    const due = store.listCommitsWithAnalysisStatus({ status: 'queued', limit: 50 })
+      .filter((commit) => commit.analysis.retryAfterMs === null || commit.analysis.updatedAtMs + commit.analysis.retryAfterMs <= now)
+      .slice(0, MAX_ANALYSES_PER_TICK);
+    for (const commit of due) {
+      if (!store || stopped) return;
+      state = 'analyzing';
+      await analyzeCommit({
+        store,
+        settings,
+        commit,
+        unavailableUntilMsByProviderId,
+        deps: { fetchImpl: deps.fetchImpl, nowMs: deps.nowMs, resolveApiKey: deps.resolveApiKey },
+      });
+    }
+  };
+
+  const tick = async () => {
+    if (!store) return;
+    state = 'observing';
+    try {
+      const knownWorktrees = new Set(store.listRepositories().flatMap((repository) => repository.worktrees.map((worktree) => worktree.worktreePath)));
+      if (settings.externalSessionDiscovery) {
+        const sweep = await sweepExternalSessions({
+          store,
+          providers: await deps.resolveSessionProviders(),
+          processes: await deps.listProcesses().catch(() => []),
+          nowMs: deps.nowMs(),
+          workingDirectoryCache,
+          observeWorkingDirectory: async (cwd, sessionActive) => {
+            // Idle sessions in an already-known checkout reuse the stored association.
+            const known = store?.listRepositories().find((repository) => repository.worktrees.some((worktree) => worktree.worktreePath === cwd));
+            if (known && !sessionActive) {
+              const worktree = known.worktrees.find((candidate) => candidate.worktreePath === cwd)!;
+              return {
+                repositoryId: known.repositoryId,
+                displayName: known.displayName,
+                commonDirPath: known.commonDirPath,
+                worktreePath: worktree.worktreePath,
+                gitDirPath: worktree.gitDirPath,
+                isLinkedWorktree: worktree.isLinkedWorktree,
+                branch: worktree.branch,
+                headCommit: worktree.headCommit,
+              };
+            }
+            knownWorktrees.delete(cwd);
+            return await observeWorktree(cwd, 'session');
+          },
+        });
+        for (const failure of sweep.providerErrors) recordError(`session discovery for ${failure.providerId} failed`, new Error(failure.message));
+      }
+      for (const worktreePath of knownWorktrees) await observeWorktree(worktreePath, 'session');
+      await drainAnalysisQueue();
+      const now = deps.nowMs();
+      if (now - lastPruneAtMs >= PRUNE_INTERVAL_MS) {
+        store.prune({ olderThanMs: now - settings.retentionDays * 24 * 60 * 60 * 1000 });
+        lastPruneAtMs = now;
+      }
+      lastSweepAtMs = now;
+    } finally {
+      state = store ? 'idle' : 'disabled';
+    }
+  };
+
+  const activate = () => {
+    if (store || stopped) return;
+    store = openCodeIntelligenceStore({ dbPath: deps.dbPath });
+    state = 'idle';
+    loop = startSingleFlightIntervalLoop({
+      intervalMs: deps.sweepIntervalMs ?? SWEEP_INTERVAL_MS,
+      task: () => serialize(tick),
+      onError: (error) => recordError('observation pass failed', error),
+      unref: true,
+      failureBackoffMs: SWEEP_INTERVAL_MS,
+      maxFailureBackoffMs: 10 * 60 * 1000,
+    });
+    loop.trigger();
+  };
+
+  const deactivate = () => {
+    loop?.stop();
+    loop = null;
+    for (const close of watchers.values()) close();
+    watchers.clear();
+    for (const timer of debounceTimers.values()) clearTimeout(timer);
+    debounceTimers.clear();
+    store?.close();
+    store = null;
+    state = 'disabled';
+  };
+
+  if (settings.enabled) activate();
+
+  return {
+    getStatus: () => ({ state, lastSweepAtMs, lastError }),
+    getSnapshot: (request) => {
+      if (!store) return DISABLED_RESPONSE;
+      const page = store.listEventsAfter({ afterSeq: request.afterSeq ?? 0, limit: request.eventLimit ?? DEFAULT_SNAPSHOT_EVENTS });
+      return {
+        ok: true,
+        worker: { state, lastSweepAtMs, lastError },
+        repositories: store.listRepositories(),
+        sessions: store.listSessions(),
+        commits: store.listRecentCommits({ limit: request.commitLimit ?? DEFAULT_SNAPSHOT_COMMITS }),
+        events: page.events,
+        latestSeq: page.latestSeq,
+        eventsTruncated: request.afterSeq !== undefined && page.truncated,
+      };
+    },
+    registerRepository: (path) => serialize(async () => {
+      if (!store) return DISABLED_RESPONSE;
+      const checkout = await observeWorktree(path, 'manual');
+      if (!checkout) return { ok: false, errorCode: 'not_a_git_repository', error: `${path} is not inside a git working tree` } as const;
+      const repository = store.listRepositories().find((candidate) => candidate.repositoryId === checkout.repositoryId);
+      return repository
+        ? { ok: true, repository }
+        : { ok: false, errorCode: 'internal_error', error: 'repository was not recorded' } as const;
+    }),
+    requestCommitAnalysis: ({ repositoryId, sha }) => serialize(async () => {
+      if (!store) return DISABLED_RESPONSE;
+      const commit = store.getCommit({ repositoryId, sha });
+      if (!commit) return { ok: false, errorCode: 'commit_not_found', error: 'commit is not observed' } as const;
+      // Manual reanalysis is an explicit user request: it resets the retry schedule but still goes
+      // through the same admission policy as automatic analysis.
+      unavailableUntilMsByProviderId.clear();
+      await analyzeCommit({
+        store,
+        settings,
+        commit: { ...commit, analysis: { ...commit.analysis, attempts: 0, retryAfterMs: null } },
+        unavailableUntilMsByProviderId,
+        deps: { fetchImpl: deps.fetchImpl, nowMs: deps.nowMs, resolveApiKey: deps.resolveApiKey },
+      });
+      return { ok: true, commit: store.getCommit({ repositoryId, sha })! };
+    }),
+    getSettings: () => redactCodeIntelligenceSettingsSecrets(settings),
+    setSettings: (raw) => serialize(async () => {
+      settings = await deps.writeSettings(raw);
+      if (settings.enabled) activate();
+      else deactivate();
+      return redactCodeIntelligenceSettingsSecrets(settings);
+    }),
+    runOnce: () => serialize(tick),
+    stop: async () => {
+      stopped = true;
+      await serialize(async () => deactivate());
+    },
+  };
+}
