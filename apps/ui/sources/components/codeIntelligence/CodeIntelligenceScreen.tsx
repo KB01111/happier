@@ -50,6 +50,16 @@ type MachineTarget = Readonly<{ serverId: string; machineId: string }>;
 const VISIBLE_COMMITS = 20;
 const VISIBLE_EVENTS = 40;
 
+/** A short, stable provider id for a model id of any length (FNV-1a). */
+function hashProviderModel(modelId: string): string {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < modelId.length; index += 1) {
+    hash ^= modelId.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(16).padStart(8, '0');
+}
+
 function formatTime(atMs: number): string {
   return new Date(atMs).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
 }
@@ -62,9 +72,13 @@ export function CodeIntelligenceScreen() {
   const [machineId, setMachineId] = React.useState<string>(() => onlineMachines[0]?.id ?? '');
   const [machineMenuOpen, setMachineMenuOpen] = React.useState(false);
 
+  // A selected machine stays selected while it is briefly offline, so its last snapshot stays on
+  // screen; only a machine that is gone entirely (or none chosen yet) falls back to an online one.
   React.useEffect(() => {
-    if (!onlineMachines.some((machine) => machine.id === machineId)) setMachineId(onlineMachines[0]?.id ?? '');
-  }, [machineId, onlineMachines]);
+    if (machineId && machines.some((machine) => machine.id === machineId)) return;
+    const fallback = onlineMachines[0]?.id ?? '';
+    if (fallback !== machineId) setMachineId(fallback);
+  }, [machineId, machines, onlineMachines]);
 
   const target = React.useMemo<MachineTarget | null>(
     () => (serverId && machineId ? { serverId, machineId } : null),
@@ -139,15 +153,19 @@ export function CodeIntelligenceScreen() {
                 else allowed.add(repositoryId);
                 return { ...current, remoteAnalysis: { ...current.remoteAnalysis, allowedRepositoryIds: [...allowed] } };
               })}
+            />
+            <AddRepositoryGroup
               onAdd={async () => {
                 const path = await Modal.prompt(t('codeIntelligence.addRepository'), t('codeIntelligence.addRepositoryPrompt'));
                 if (!path?.trim()) return;
                 const result = await registerCodeIntelligenceRepository(target, path.trim()).catch(() => null);
                 if (!result?.ok) {
-                  Modal.alert(
-                    t('codeIntelligence.addRepository'),
-                    result?.errorCode === 'path_not_allowed' ? t('codeIntelligence.addRepositoryDenied') : t('codeIntelligence.addRepositoryFailed'),
-                  );
+                  const message = !result || result.errorCode === 'internal_error' || result.errorCode === 'code_intelligence_disabled'
+                    ? t('codeIntelligence.addRepositoryUnreachable')
+                    : result.errorCode === 'path_not_allowed'
+                      ? t('codeIntelligence.addRepositoryDenied')
+                      : t('codeIntelligence.addRepositoryFailed');
+                  Modal.alert(t('codeIntelligence.addRepository'), message);
                 }
                 feed.refresh();
               }}
@@ -169,35 +187,61 @@ export function CodeIntelligenceScreen() {
   );
 }
 
-/** Settings are read once per machine and written only on explicit user intent. */
+/**
+ * Settings are read once per machine and written only on explicit user intent. Edits are queued and
+ * each applies to the latest value (optimistically), so two quick toggles never overwrite each
+ * other; a reply for a machine the user has left is dropped.
+ */
 function useCodeIntelligenceSettings(target: MachineTarget | null, phase: string) {
   const [value, setValue] = React.useState<CodeIntelligenceSettingsV1 | null>(null);
   const serverId = target?.serverId;
   const machineId = target?.machineId;
+  const targetKey = `${serverId ?? ''}/${machineId ?? ''}`;
+  const targetKeyRef = React.useRef(targetKey);
+  targetKeyRef.current = targetKey;
+  const valueRef = React.useRef<CodeIntelligenceSettingsV1 | null>(null);
+  const queueRef = React.useRef<Promise<void>>(Promise.resolve());
   const daemonReachable = phase !== 'loading' && phase !== 'unreachable';
+
+  const apply = React.useCallback((next: CodeIntelligenceSettingsV1 | null) => {
+    valueRef.current = next;
+    setValue(next);
+  }, []);
+
   React.useEffect(() => {
-    setValue(null);
+    apply(null);
     if (!serverId || !machineId || !daemonReachable) return;
     let cancelled = false;
     void fetchCodeIntelligenceSettings({ serverId, machineId })
       .then((next) => {
-        if (!cancelled) setValue(next);
+        if (!cancelled) apply(next);
       })
       .catch(() => undefined);
     return () => {
       cancelled = true;
     };
-  }, [daemonReachable, machineId, serverId]);
+  }, [apply, daemonReachable, machineId, serverId]);
 
   const update = React.useCallback((change: (current: CodeIntelligenceSettingsV1) => CodeIntelligenceSettingsV1, after?: () => void) => {
-    if (!serverId || !machineId || !value) return;
-    void saveCodeIntelligenceSettings({ serverId, machineId }, change(value))
-      .then((saved) => {
-        setValue(saved);
+    if (!serverId || !machineId) return;
+    const requestedKey = `${serverId}/${machineId}`;
+    queueRef.current = queueRef.current.then(async () => {
+      const current = valueRef.current;
+      if (!current || targetKeyRef.current !== requestedKey) return;
+      const next = change(current);
+      apply(next);
+      try {
+        const saved = await saveCodeIntelligenceSettings({ serverId, machineId }, next);
+        if (targetKeyRef.current !== requestedKey) return;
+        apply(saved);
         after?.();
-      })
-      .catch(() => Modal.alert(t('codeIntelligence.title'), t('codeIntelligence.saveFailed')));
-  }, [machineId, serverId, value]);
+      } catch {
+        if (targetKeyRef.current !== requestedKey) return;
+        apply(current);
+        Modal.alert(t('codeIntelligence.title'), t('codeIntelligence.saveFailed'));
+      }
+    });
+  }, [apply, machineId, serverId]);
 
   return { value, update };
 }
@@ -207,7 +251,6 @@ const RepositoriesGroup = React.memo(function RepositoriesGroup(props: Readonly<
   sessions: readonly ObservedAgentSessionV1[];
   settings: CodeIntelligenceSettingsV1 | null;
   onToggleRemoteReview: (repositoryId: string) => void;
-  onAdd: () => void;
 }>) {
   const { theme } = useUnistyles();
   return (
@@ -235,6 +278,14 @@ const RepositoriesGroup = React.memo(function RepositoriesGroup(props: Readonly<
           />
         );
       })}
+    </ItemGroup>
+  );
+});
+
+const AddRepositoryGroup = React.memo(function AddRepositoryGroup(props: Readonly<{ onAdd: () => void }>) {
+  const { theme } = useUnistyles();
+  return (
+    <ItemGroup>
       <Item
         title={t('codeIntelligence.addRepository')}
         icon={<Icon name="plus-circle" size={ICON_SIZE.lg} color={theme.colors.text.link} />}
@@ -272,7 +323,7 @@ const AgentsGroup = React.memo(function AgentsGroup(props: Readonly<{ sessions: 
 
 const CommitsGroup = React.memo(function CommitsGroup(props: Readonly<{
   commits: readonly CodeIntelligenceCommitV1[];
-  onReviewAgain: (commit: CodeIntelligenceCommitV1) => void;
+  onReviewAgain: (commit: CodeIntelligenceCommitV1) => Promise<void> | void;
 }>) {
   return (
     <ItemGroup title={t('codeIntelligence.commits')} footer={props.commits.length === 0 ? t('codeIntelligence.commitsEmpty') : undefined}>
@@ -285,11 +336,13 @@ const CommitsGroup = React.memo(function CommitsGroup(props: Readonly<{
 
 const CommitRow = React.memo(function CommitRow(props: Readonly<{
   commit: CodeIntelligenceCommitV1;
-  onReviewAgain: (commit: CodeIntelligenceCommitV1) => void;
+  onReviewAgain: (commit: CodeIntelligenceCommitV1) => Promise<void> | void;
 }>) {
   const { theme } = useUnistyles();
   const [expanded, setExpanded] = React.useState(false);
+  const [reviewRequested, setReviewRequested] = React.useState(false);
   const { commit } = props;
+  const reviewInProgress = reviewRequested || commit.analysis.status === 'analyzing';
   const findings = commit.analysis.findings;
   const riskColor = commit.analysis.riskLevel === 'high' || commit.analysis.riskLevel === 'critical'
     ? theme.colors.state.danger.foreground
@@ -310,7 +363,7 @@ const CommitRow = React.memo(function CommitRow(props: Readonly<{
             <Text style={{ color: theme.colors.text.secondary }}>{t('codeIntelligence.possibleSession')}</Text>
           ) : null}
           {commit.changedSymbols.slice(0, 12).map((symbol) => (
-            <Text key={`${symbol.filePath}:${symbol.name}`} style={{ color: theme.colors.text.secondary }}>
+            <Text key={`${symbol.filePath}:${symbol.startLine}:${symbol.name}`} style={{ color: theme.colors.text.secondary }}>
               {`${formatChangeKind(symbol.changeKind)} · ${symbol.name} · ${symbol.filePath}:${symbol.startLine}`}
             </Text>
           ))}
@@ -325,7 +378,16 @@ const CommitRow = React.memo(function CommitRow(props: Readonly<{
               <Text style={{ color: theme.colors.text.tertiary }}>{t('codeIntelligence.findingSuspected')}</Text>
             </View>
           ))}
-          <Item title={t('codeIntelligence.reviewAgain')} onPress={() => props.onReviewAgain(commit)} density="compact" />
+          <Item
+            title={t('codeIntelligence.reviewAgain')}
+            disabled={reviewInProgress}
+            loading={reviewInProgress}
+            onPress={() => {
+              setReviewRequested(true);
+              void Promise.resolve(props.onReviewAgain(commit)).finally(() => setReviewRequested(false));
+            }}
+            density="compact"
+          />
         </View>
       ) : null}
     </>
@@ -375,14 +437,16 @@ const RemoteReviewGroup = React.memo(function RemoteReviewGroup(props: Readonly<
           if (!modelId) return;
           const apiKey = (await Modal.prompt(t('codeIntelligence.addGroqModel'), t('codeIntelligence.apiKeyPrompt'), { inputType: 'secure-text' }))?.trim();
           if (!apiKey) return;
+          const groqProviderId = `groq-${hashProviderModel(modelId)}`;
           props.update((current) => ({
             ...current,
             remoteAnalysis: {
               ...current.remoteAnalysis,
+              // Adding a model that is already configured replaces it (for example with a new key).
               providers: [
-                ...current.remoteAnalysis.providers,
+                ...current.remoteAnalysis.providers.filter((provider) => provider.id !== groqProviderId),
                 {
-                  id: `groq-${modelId}`,
+                  id: groqProviderId,
                   kind: 'groq',
                   enabled: true,
                   baseUrl: null,
