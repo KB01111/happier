@@ -781,6 +781,7 @@ export const en = {
         addRepository: 'Add a repository',
         addRepositoryPrompt: 'Path to a git checkout on this machine',
         addRepositoryFailed: 'That path isn\'t inside a git working tree.',
+        addRepositoryDenied: 'Happier isn\'t allowed to read that folder on this machine.',
         agents: 'Agents',
         agentsEmpty: 'No agent sessions in the last day.',
         agentsFooter: 'Sessions started outside Happier are observed read-only.',

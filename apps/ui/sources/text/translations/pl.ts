@@ -943,6 +943,7 @@ export const pl: TranslationStructure = {
         addRepository: "Dodaj repozytorium",
         addRepositoryPrompt: "Ścieżka do checkoutu git na tym komputerze",
         addRepositoryFailed: "Ta ścieżka nie leży w drzewie roboczym git.",
+        addRepositoryDenied: "Happier nie ma dostępu do tego folderu na tym komputerze.",
         agents: "Agenci",
         agentsEmpty: "Brak sesji agentów w ostatniej dobie.",
         agentsFooter: "Sesje uruchomione poza Happier są obserwowane tylko do odczytu.",

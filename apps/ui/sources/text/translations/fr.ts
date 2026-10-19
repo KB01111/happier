@@ -783,6 +783,7 @@ export const fr: TranslationStructure = {
         addRepository: 'Ajouter un dépôt',
         addRepositoryPrompt: 'Chemin d\'un checkout git sur cette machine',
         addRepositoryFailed: 'Ce chemin n\'est pas dans un répertoire de travail git.',
+        addRepositoryDenied: 'Happier n\'est pas autorisé à lire ce dossier sur cette machine.',
         agents: 'Agents de code',
         agentsEmpty: 'Aucune session d\'agent au cours de la dernière journée.',
         agentsFooter: 'Les sessions lancées hors de Happier sont observées en lecture seule.',

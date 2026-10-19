@@ -108,6 +108,28 @@ describe('code intelligence worker', () => {
     expect(recovered.ok && recovered.events.map((event) => event.kind)).toEqual(['commit_observed', 'analysis_skipped']);
   });
 
+  it('resumes an analysis that a previous daemon stopped in the middle of', async () => {
+    const { root, repo } = await setupRepo();
+    const deps = buildDeps(root, { enabled: true }, new Map());
+    const first = await start(deps);
+    await first.registerRepository(repo);
+    await writeFile(join(repo, 'cart.py'), 'def total(items):\n    return 0\n');
+    await git(repo, ['commit', '-am', 'wip']);
+    await first.runOnce();
+    await first.stop();
+
+    const { openCodeIntelligenceStore } = await import('./store/codeIntelligenceStore');
+    const store = openCodeIntelligenceStore({ dbPath: deps.dbPath });
+    const [commit] = store.listRecentCommits({ limit: 1 });
+    store.updateCommitAnalysis({ repositoryId: commit!.repositoryId, sha: commit!.sha, analysis: { ...commit!.analysis, status: 'analyzing' } });
+    store.close();
+
+    const restarted = await start(deps);
+    await restarted.runOnce();
+    const snapshot = restarted.getSnapshot({});
+    expect(snapshot.ok && snapshot.commits[0]?.analysis.status).toBe('skipped');
+  });
+
   it('never hands API keys back to clients', async () => {
     const { root } = await setupRepo();
     const worker = await start(buildDeps(root, { enabled: true }, new Map()));

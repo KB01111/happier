@@ -903,6 +903,7 @@ export const ja: TranslationStructure = {
     addRepository: "リポジトリを追加",
     addRepositoryPrompt: "このマシン上の git チェックアウトのパス",
     addRepositoryFailed: "そのパスは git の作業ツリー内にありません。",
+    addRepositoryDenied: "このマシンでは Happier はそのフォルダーを読み取れません。",
     agents: "エージェント",
     agentsEmpty: "過去 1 日のエージェントセッションはありません。",
     agentsFooter: "Happier の外で開始したセッションは読み取り専用で観察します。",

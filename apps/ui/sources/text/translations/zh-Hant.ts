@@ -1059,6 +1059,7 @@ const zhHantOverrides: DeepPartial<TranslationStructure> = {
         addRepository: '新增儲存庫',
         addRepositoryPrompt: '這台機器上 git 檢出目錄的路徑',
         addRepositoryFailed: '該路徑不在 git 工作樹中。',
+        addRepositoryDenied: 'Happier 無權讀取這台機器上的該資料夾。',
         agents: '代理',
         agentsEmpty: '過去一天沒有代理工作階段。',
         agentsFooter: '在 Happier 之外啟動的工作階段以唯讀方式觀察。',

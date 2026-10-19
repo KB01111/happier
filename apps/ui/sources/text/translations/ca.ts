@@ -872,6 +872,7 @@ export const ca: TranslationStructure = {
         addRepository: 'Afegeix un repositori',
         addRepositoryPrompt: 'Camí a un checkout de git en aquest ordinador',
         addRepositoryFailed: 'Aquest camí no és dins d\'un arbre de treball de git.',
+        addRepositoryDenied: 'Happier no té permís per llegir aquesta carpeta en aquest ordinador.',
         agents: 'Agents de codi',
         agentsEmpty: 'Cap sessió d\'agent durant el darrer dia.',
         agentsFooter: 'Les sessions iniciades fora de Happier s\'observen només en lectura.',

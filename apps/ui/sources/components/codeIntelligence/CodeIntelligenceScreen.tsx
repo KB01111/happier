@@ -143,7 +143,12 @@ export function CodeIntelligenceScreen() {
                 const path = await Modal.prompt(t('codeIntelligence.addRepository'), t('codeIntelligence.addRepositoryPrompt'));
                 if (!path?.trim()) return;
                 const result = await registerCodeIntelligenceRepository(target, path.trim()).catch(() => null);
-                if (!result?.ok) Modal.alert(t('codeIntelligence.addRepository'), t('codeIntelligence.addRepositoryFailed'));
+                if (!result?.ok) {
+                  Modal.alert(
+                    t('codeIntelligence.addRepository'),
+                    result?.errorCode === 'path_not_allowed' ? t('codeIntelligence.addRepositoryDenied') : t('codeIntelligence.addRepositoryFailed'),
+                  );
+                }
                 feed.refresh();
               }}
             />

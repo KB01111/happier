@@ -920,6 +920,7 @@ export const es: TranslationStructure = {
     addRepository: "Añadir un repositorio",
     addRepositoryPrompt: "Ruta a un checkout de git en este equipo",
     addRepositoryFailed: "Esa ruta no está dentro de un árbol de trabajo de git.",
+    addRepositoryDenied: "Happier no tiene permiso para leer esa carpeta en este equipo.",
     agents: "Agentes",
     agentsEmpty: "Ninguna sesión de agente en el último día.",
     agentsFooter: "Las sesiones iniciadas fuera de Happier se observan en solo lectura.",

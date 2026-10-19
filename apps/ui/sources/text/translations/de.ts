@@ -783,6 +783,7 @@ export const de: TranslationStructure = {
         addRepository: 'Repository hinzufügen',
         addRepositoryPrompt: 'Pfad zu einem Git-Checkout auf diesem Rechner',
         addRepositoryFailed: 'Dieser Pfad liegt nicht in einem Git-Arbeitsverzeichnis.',
+        addRepositoryDenied: 'Happier darf diesen Ordner auf diesem Rechner nicht lesen.',
         agents: 'Agenten',
         agentsEmpty: 'Keine Agent-Sessions am letzten Tag.',
         agentsFooter: 'Außerhalb von Happier gestartete Sessions werden nur lesend beobachtet.',

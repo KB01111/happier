@@ -918,6 +918,7 @@ export const zhHans: TranslationStructure = {
     addRepository: "添加仓库",
     addRepositoryPrompt: "这台机器上 git 检出目录的路径",
     addRepositoryFailed: "该路径不在 git 工作树中。",
+    addRepositoryDenied: "Happier 无权读取这台机器上的该文件夹。",
     agents: "代理",
     agentsEmpty: "过去一天没有代理会话。",
     agentsFooter: "在 Happier 之外启动的会话以只读方式观察。",

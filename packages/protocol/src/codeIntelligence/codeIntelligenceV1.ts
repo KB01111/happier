@@ -301,7 +301,7 @@ export const CodeIntelligenceRepositoryRegisterResponseV1Schema = z.union([
   z
     .object({
       ok: z.literal(false),
-      errorCode: z.enum(['code_intelligence_disabled', 'not_a_git_repository', 'invalid_request', 'internal_error']),
+      errorCode: z.enum(['code_intelligence_disabled', 'not_a_git_repository', 'path_not_allowed', 'invalid_request', 'internal_error']),
       error: z.string().min(1),
     })
     .passthrough(),

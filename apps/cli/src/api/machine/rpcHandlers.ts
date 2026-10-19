@@ -1135,6 +1135,10 @@ export function registerMachineRpcHandlers(params: Readonly<{
     registerMachineCodeIntelligenceRpcHandlers({
       rpcHandlerManager,
       worker: handlers.codeIntelligence,
+      deps: {
+        ...(effectiveMachineRpcWorkingDirectory ? { workingDirectory: effectiveMachineRpcWorkingDirectory } : {}),
+        ...(accessPolicy ? { accessPolicy } : {}),
+      },
     });
   }
   if (handlers.daemonServerWorkScheduler) {

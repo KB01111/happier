@@ -35,6 +35,12 @@ const WATCH_DEBOUNCE_MS = 750;
 const MAX_ANALYSES_PER_TICK = 5;
 const PRUNE_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const DEFAULT_SNAPSHOT_EVENTS = 200;
+/**
+ * Daemon shutdown must not be held by a remote model request. Stopping waits this long for the
+ * current unit of work, then closes the store; an interrupted analysis stays `analyzing`/`queued`
+ * and is retried or re-requested on the next start.
+ */
+const STOP_GRACE_MS = 2_000;
 const DEFAULT_SNAPSHOT_COMMITS = 50;
 
 export type CodeIntelligenceWorkerDeps = Readonly<{
@@ -204,6 +210,14 @@ export async function startCodeIntelligenceWorker(deps: CodeIntelligenceWorkerDe
   const activate = () => {
     if (store || stopped) return;
     store = openCodeIntelligenceStore({ dbPath: deps.dbPath });
+    // This worker is the store's only writer, so an `analyzing` job here was interrupted by a stop.
+    for (const commit of store.listCommitsWithAnalysisStatus({ status: 'analyzing', limit: 1_000 })) {
+      store.updateCommitAnalysis({
+        repositoryId: commit.repositoryId,
+        sha: commit.sha,
+        analysis: { ...commit.analysis, status: 'queued', reason: 'interrupted', retryAfterMs: null, updatedAtMs: deps.nowMs() },
+      });
+    }
     state = 'idle';
     loop = startSingleFlightIntervalLoop({
       intervalMs: deps.sweepIntervalMs ?? SWEEP_INTERVAL_MS,
@@ -281,7 +295,9 @@ export async function startCodeIntelligenceWorker(deps: CodeIntelligenceWorkerDe
     runOnce: () => serialize(tick),
     stop: async () => {
       stopped = true;
-      await serialize(async () => deactivate());
+      loop?.stop();
+      await Promise.race([chain, new Promise((resolve) => setTimeout(resolve, STOP_GRACE_MS))]);
+      deactivate();
     },
   };
 }

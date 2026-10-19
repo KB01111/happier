@@ -947,6 +947,7 @@ export const ru: TranslationStructure = {
     addRepository: "Добавить репозиторий",
     addRepositoryPrompt: "Путь к git-checkout на этом компьютере",
     addRepositoryFailed: "Этот путь не находится в рабочем дереве git.",
+    addRepositoryDenied: "Happier не разрешено читать эту папку на этом компьютере.",
     agents: "Агенты",
     agentsEmpty: "За последние сутки сессий агентов не было.",
     agentsFooter: "Сессии, запущенные вне Happier, наблюдаются только на чтение.",
