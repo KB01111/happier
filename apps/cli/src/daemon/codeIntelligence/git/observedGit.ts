@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
-import { realpath } from 'node:fs/promises';
+import { realpath } from 'node:fs';
+import { promisify } from 'node:util';
 import { basename, dirname } from 'node:path';
 
 import type { CodeIntelligenceChangedFileV1 } from '@happier-dev/protocol';
@@ -39,11 +40,14 @@ export type ObservedCheckout = Readonly<{
   headCommit: string | null;
 }>;
 
+const realpathNative = promisify(realpath.native);
+
 async function canonicalIdentityPath(path: string): Promise<string> {
-  const resolved = await realpath(path).catch(() => path);
-  const slashed = resolved.replace(/\\/g, '/').replace(/\/+$/, '');
-  // Windows and default macOS volumes are case-insensitive; one repository must have one id.
-  return process.platform === 'win32' || process.platform === 'darwin' ? slashed.toLowerCase() : slashed;
+  // The native realpath returns the on-disk casing on case-insensitive volumes, so one repository
+  // gets one id without folding case (which would merge distinct repositories on case-sensitive
+  // volumes, and with them their remote-review consent).
+  const resolved = await realpathNative(path).catch(() => path);
+  return resolved.replace(/\\/g, '/').replace(/\/+$/, '');
 }
 
 function repositoryDisplayName(commonDirPath: string): string {
@@ -78,25 +82,36 @@ export type NewCommitRange = Readonly<{
   omittedCount: number;
 }>;
 
+async function commitExists(worktreePath: string, sha: string): Promise<boolean | null> {
+  const result = await runObserverGit({ cwd: worktreePath, args: ['cat-file', '-e', `${sha}^{commit}`] });
+  if (result.success) return true;
+  // `cat-file -e` exits 1 for a missing object; anything else (timeout, spawn failure) is unknown.
+  return result.exitCode === 1 && !result.timedOut ? false : null;
+}
+
 /**
- * Lists commits reachable from `currentHead` but not from `previousHead`. Works for fast-forwards,
- * merges and rebases alike; commits already known are deduplicated by the store, so a branch
- * pointer moving to an existing commit produces no new commit observation.
+ * Lists commits reachable from `currentHead` but not from `previousHead` (all of them when the
+ * previous HEAD was unborn). Works for fast-forwards, merges and rebases alike; commits already
+ * known are deduplicated by the store, so a branch pointer moving to an existing commit produces no
+ * new commit observation. Returns null when git could not answer, so the caller retries later.
  */
 export async function listNewCommits(input: Readonly<{
   worktreePath: string;
-  previousHead: string;
+  previousHead: string | null;
   currentHead: string;
   maxCommits: number;
-}>): Promise<NewCommitRange> {
+}>): Promise<NewCommitRange | null> {
   if (input.previousHead === input.currentHead) return { shas: [], omittedCount: 0 };
+  const exclusion = input.previousHead ? [`^${input.previousHead}`] : [];
   const result = await runObserverGit({
     cwd: input.worktreePath,
-    args: ['rev-list', input.currentHead, `^${input.previousHead}`, '--'],
+    args: ['rev-list', input.currentHead, ...exclusion, '--'],
   });
   if (!result.success) {
-    // The previous head is gone (gc after rewrite): fall back to the new head alone.
-    return { shas: [input.currentHead], omittedCount: 0 };
+    // Only a previous head that no longer exists (gc after a rewrite) falls back to the new head
+    // alone; any other failure is retried rather than silently skipping commits.
+    const previousExists = input.previousHead ? await commitExists(input.worktreePath, input.previousHead) : null;
+    return previousExists === false ? { shas: [input.currentHead], omittedCount: 0 } : null;
   }
   const newestFirst = result.stdout.split('\n').map((line) => line.trim()).filter(Boolean);
   const kept = newestFirst.slice(0, input.maxCommits);
@@ -190,10 +205,11 @@ export function parseNumstatZ(output: string): Map<string, Readonly<{ insertions
   return stats;
 }
 
+/** Null when git could not list the changes; an empty commit yields an empty list. */
 export async function readCommitChangedFiles(input: Readonly<{
   worktreePath: string;
   header: CommitHeader;
-}>): Promise<CodeIntelligenceChangedFileV1[]> {
+}>): Promise<CodeIntelligenceChangedFileV1[] | null> {
   // Merges are compared with their first parent: the changes the merge brought onto the branch.
   const range = input.header.parents.length === 0
     ? ['--root', input.header.sha]
@@ -202,7 +218,7 @@ export async function readCommitChangedFiles(input: Readonly<{
     runObserverGit({ cwd: input.worktreePath, args: ['diff-tree', '-r', '-M', '-z', '--no-commit-id', '--name-status', ...range, '--'] }),
     runObserverGit({ cwd: input.worktreePath, args: ['diff-tree', '-r', '-M', '-z', '--no-commit-id', '--numstat', ...range, '--'] }),
   ]);
-  if (!nameStatus.success) return [];
+  if (!nameStatus.success) return null;
   const stats = numstat.success ? parseNumstatZ(numstat.stdout) : new Map();
   return parseNameStatusZ(nameStatus.stdout).map((entry) => {
     const counts = stats.get(entry.path);
@@ -249,10 +265,11 @@ export async function readFileDiff(input: Readonly<{
   const pathspecs = [toRepoRootLiteralPathspec(input.path)];
   if (input.previousPath) pathspecs.push(toRepoRootLiteralPathspec(input.previousPath));
   const range = input.baseSha ? [input.baseSha, input.sha] : ['--root', input.sha];
-  const command = input.baseSha ? 'diff' : 'diff-tree';
+  // `diff-tree` (root commits) only recurses into subdirectories with `-r`.
+  const command = input.baseSha ? ['diff'] : ['diff-tree', '-r'];
   const result = await runObserverGit({
     cwd: input.worktreePath,
-    args: [command, '-M', '-p', `-U${input.contextLines}`, '--no-color', '--no-ext-diff', ...range, '--', ...pathspecs],
+    args: [...command, '-M', '-p', `-U${input.contextLines}`, '--no-color', '--no-ext-diff', ...range, '--', ...pathspecs],
     maxOutputBytes: input.maxOutputBytes,
   });
   return result.success ? result.stdout : null;

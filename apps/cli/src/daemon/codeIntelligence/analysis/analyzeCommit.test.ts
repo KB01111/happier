@@ -40,6 +40,7 @@ async function observedCommit(): Promise<Readonly<{ store: CodeIntelligenceStore
   await observe();
   await writeFile(join(repo, 'cart.ts'), `const groqKey = "${SECRET}";\nexport function total(items: number[]): number {\n  return items.length - 1;\n}\n`);
   await writeFile(join(repo, '.env'), 'DATABASE_PASSWORD=hunter2hunter2\n');
+  await writeFile(join(repo, 'deploy.ts'), 'export const deployRef = "glpat-AbCdEfGhIjKlMnOpQrSt";\n');
   await git(repo, ['add', '.']);
   await git(repo, ['commit', '-m', 'fix: totals']);
   const [commit] = (await observe())!.newCommits;
@@ -144,6 +145,7 @@ describe('analyzeCommit', () => {
     expect(sentPrompt).toContain('modified function total');
     expect(sentPrompt).not.toContain(SECRET);
     expect(sentPrompt).not.toContain('hunter2');
+    expect(sentPrompt).not.toContain('glpat-AbCdEfGhIjKlMnOpQrSt');
   });
 
   it('keeps the job queued with the retry instruction when every admitted provider is rate limited', async () => {
@@ -185,6 +187,61 @@ describe('analyzeCommit', () => {
     expect(analysis).toMatchObject({ status: 'completed', billing: 'paid' });
     expect(analysis.estimatedCostUsd).toBeCloseTo((120 * 3 + 40 * 15) / 1_000_000);
     expect(calls).toHaveLength(1);
+  });
+
+  it('records a failure instead of throwing when the provider answers with a JSON null envelope or the key cannot be read', async () => {
+    const { store, commit } = await observedCommit();
+    const settings = settingsWith(commit.repositoryId);
+    settings.remoteAnalysis.providers = settings.remoteAnalysis.providers.filter((provider) => provider.id === 'groq');
+
+    const nullEnvelope = await analyzeCommit({
+      store,
+      settings,
+      commit,
+      unavailableUntilMsByProviderId: new Map(),
+      deps: { fetchImpl: scriptedFetch({ 'api.groq.com': () => new Response('null', { status: 200 }) }, []), nowMs: () => NOW, resolveApiKey: () => 'key' },
+    });
+    expect(nullEnvelope).toMatchObject({ status: 'failed', reason: 'invalid_model_output' });
+
+    const keyFailure = await analyzeCommit({
+      store,
+      settings,
+      commit: store.getCommit(commit)!,
+      unavailableUntilMsByProviderId: new Map(),
+      deps: { fetchImpl: scriptedFetch({}, []), nowMs: () => NOW, resolveApiKey: async () => { throw new Error('keychain locked'); } },
+    });
+    expect(keyFailure).toMatchObject({ status: 'failed', reason: 'provider_key_unavailable' });
+    expect(store.getCommit(commit)?.analysis.status).toBe('failed');
+  });
+
+  it('charges every paid completion against the budget, even unusable or usage-less ones', async () => {
+    const { store, commit } = await observedCommit();
+    const settings = settingsWith(commit.repositoryId);
+    settings.remoteAnalysis.providers = settings.remoteAnalysis.providers.filter((provider) => provider.id === 'premium');
+    settings.remoteAnalysis.routingPolicy = 'lowest_cost';
+    settings.remoteAnalysis.allowPaid = true;
+    settings.remoteAnalysis.monthlyBudgetUsd = 1;
+
+    await analyzeCommit({
+      store,
+      settings,
+      commit,
+      unavailableUntilMsByProviderId: new Map(),
+      deps: { fetchImpl: scriptedFetch({ 'paid.example': () => completion('not json') }, []), nowMs: () => NOW, resolveApiKey: () => 'key' },
+    });
+    expect(store.getMonthlySpendUsd({ monthKey: '2026-10' })).toBeCloseTo((120 * 3 + 40 * 15) / 1_000_000);
+
+    const noUsage = new Response(JSON.stringify({ choices: [{ message: { content: VALID_REVIEW } }] }), { status: 200 });
+    const before = store.getMonthlySpendUsd({ monthKey: '2026-10' });
+    await analyzeCommit({
+      store,
+      settings,
+      commit: store.getCommit(commit)!,
+      unavailableUntilMsByProviderId: new Map(),
+      deps: { fetchImpl: scriptedFetch({ 'paid.example': () => noUsage }, []), nowMs: () => NOW, resolveApiKey: () => 'key' },
+    });
+    // Without reported usage the full output allowance is charged rather than nothing.
+    expect(store.getMonthlySpendUsd({ monthKey: '2026-10' }) - before).toBeGreaterThanOrEqual((2_000 * 15) / 1_000_000);
   });
 
   it('fails visibly instead of persisting unvalidated model output', async () => {

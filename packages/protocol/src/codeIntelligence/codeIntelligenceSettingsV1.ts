@@ -38,7 +38,12 @@ export const CodeIntelligenceAnalysisProviderV1Schema = z
     inputPricePerMillionUsd: z.number().min(0).nullable().default(null),
     outputPricePerMillionUsd: z.number().min(0).nullable().default(null),
   })
-  .passthrough();
+  .passthrough()
+  .superRefine((provider, ctx) => {
+    if (provider.kind === 'openai_compatible' && !provider.baseUrl) {
+      ctx.addIssue({ code: 'custom', message: 'baseUrl is required for openai_compatible providers', path: ['baseUrl'] });
+    }
+  });
 export type CodeIntelligenceAnalysisProviderV1 = z.infer<typeof CodeIntelligenceAnalysisProviderV1Schema>;
 
 export const CodeIntelligenceRoutingPolicyV1Schema = z.enum([
@@ -84,7 +89,11 @@ export type CodeIntelligenceSettingsV1 = z.infer<typeof CodeIntelligenceSettings
 
 export const DEFAULT_CODE_INTELLIGENCE_SETTINGS: CodeIntelligenceSettingsV1 = CodeIntelligenceSettingsV1Schema.parse({});
 
-/** Malformed persisted settings degrade to the fail-closed defaults instead of throwing. */
+/**
+ * Malformed persisted settings degrade to the fail-closed defaults instead of throwing. Writes must
+ * not use this: an invalid update is rejected with `CodeIntelligenceSettingsV1Schema.parse` so it
+ * can never silently reset a user's configuration.
+ */
 export function normalizeCodeIntelligenceSettings(raw: unknown): CodeIntelligenceSettingsV1 {
   const parsed = CodeIntelligenceSettingsV1Schema.safeParse(raw ?? {});
   return parsed.success ? parsed.data : DEFAULT_CODE_INTELLIGENCE_SETTINGS;

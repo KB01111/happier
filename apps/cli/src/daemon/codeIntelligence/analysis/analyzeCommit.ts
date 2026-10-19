@@ -94,7 +94,9 @@ export async function analyzeCommit(input: Readonly<{
     baseSha: commit.parentCount > 0 ? `${commit.sha}^1` : null,
     excludedPathPrefixes: input.settings.excludedPathPrefixes,
   });
-  const estimatedInputTokens = Math.ceil((COMMIT_ANALYSIS_SYSTEM_PROMPT.length + prompt.user.length) / 4);
+  // UTF-8 bytes bound the token count from above for every tokenizer in use, so paid admission never
+  // under-estimates a request against the remaining budget.
+  const estimatedInputTokens = Buffer.byteLength(COMMIT_ANALYSIS_SYSTEM_PROMPT, 'utf8') + Buffer.byteLength(prompt.user, 'utf8');
   const route = selectAnalysisRoute({
     settings: input.settings.remoteAnalysis,
     repositoryId: commit.repositoryId,
@@ -113,15 +115,37 @@ export async function analyzeCommit(input: Readonly<{
   persist({ ...base, status: 'analyzing' }, 'analysis_started');
   let lastFailure = 'provider_unavailable';
   let earliestRetryMs: number | null = null;
+  // Every completed exchange may have been billed, usable or not; without reported usage the full
+  // output allowance is charged so the monthly budget errs towards stopping early.
+  const charge = (
+    provider: CodeIntelligenceAnalysisProviderV1,
+    usage: Readonly<{ inputTokens: number | null; outputTokens: number | null }>,
+  ): number => {
+    const inputTokens = usage.inputTokens ?? estimatedInputTokens;
+    const outputTokens = usage.outputTokens ?? (provider.billing === 'paid' ? MAX_OUTPUT_TOKENS : 0);
+    const costUsd = provider.billing === 'paid'
+      ? (inputTokens * (provider.inputPricePerMillionUsd ?? 0) + outputTokens * (provider.outputPricePerMillionUsd ?? 0)) / 1_000_000
+      : 0;
+    store.recordUsage({ monthKey: monthKey(deps.nowMs()), providerId: provider.id, inputTokens, outputTokens, costUsd });
+    return costUsd;
+  };
+
   for (const { provider } of route.candidates) {
     const baseUrl = resolveChatCompletionBaseUrl(provider.kind, provider.baseUrl);
     if (!baseUrl) {
       lastFailure = 'provider_misconfigured';
       continue;
     }
+    let apiKey: string | null;
+    try {
+      apiKey = await deps.resolveApiKey(provider);
+    } catch {
+      lastFailure = 'provider_key_unavailable';
+      continue;
+    }
     const result = await requestChatCompletion({
       baseUrl,
-      apiKey: await deps.resolveApiKey(provider),
+      apiKey,
       modelId: provider.modelId,
       system: COMMIT_ANALYSIS_SYSTEM_PROMPT,
       user: prompt.user,
@@ -137,21 +161,17 @@ export async function analyzeCommit(input: Readonly<{
         earliestRetryMs = earliestRetryMs === null ? waitMs : Math.min(earliestRetryMs, waitMs);
         lastFailure = result.kind === 'rate_limited' ? 'rate_limited' : 'provider_unavailable';
       } else {
+        if (result.billed) charge(provider, result.billed);
         lastFailure = result.kind === 'rejected' ? 'provider_rejected_request' : 'invalid_model_output';
       }
       continue;
     }
+    const costUsd = charge(provider, result);
     const parsed = parseCommitAnalysisOutput({ content: result.content, commitSha: commit.sha });
     if (!parsed) {
       lastFailure = 'invalid_model_output';
       continue;
     }
-    const inputTokens = result.inputTokens ?? estimatedInputTokens;
-    const outputTokens = result.outputTokens ?? 0;
-    const costUsd = provider.billing === 'paid'
-      ? (inputTokens * (provider.inputPricePerMillionUsd ?? 0) + outputTokens * (provider.outputPricePerMillionUsd ?? 0)) / 1_000_000
-      : 0;
-    store.recordUsage({ monthKey: monthKey(deps.nowMs()), providerId: provider.id, inputTokens, outputTokens, costUsd });
     return persist({
       ...base,
       status: 'completed',

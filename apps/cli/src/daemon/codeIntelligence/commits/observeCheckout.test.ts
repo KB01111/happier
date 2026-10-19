@@ -1,5 +1,5 @@
 import { execFile as execFileCallback } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -106,6 +106,29 @@ describe('observeCheckout', () => {
     expect(kinds.filter((kind) => kind === 'repository_registered')).toHaveLength(1);
     expect(kinds).toContain('branch_changed');
     expect(store.listRepositories()[0]?.worktrees).toHaveLength(2);
+  });
+
+  it('records the first commit of a repository that was registered before it had any commits', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'ci-observe-unborn-'));
+    cleanups.push(() => rm(root, { recursive: true, force: true }));
+    const repo = join(root, 'fresh');
+    await execFile('git', ['init', '-b', 'main', repo]);
+    await git(repo, ['config', 'user.email', 'dev@example.com']);
+    await git(repo, ['config', 'user.name', 'Dev']);
+    const store = openCodeIntelligenceStore({ dbPath: join(root, 'ci.sqlite') });
+    cleanups.push(() => store.close());
+
+    expect((await observe(store, repo))?.checkout.headCommit).toBeNull();
+
+    await mkdir(join(repo, 'src'), { recursive: true });
+    await writeFile(join(repo, 'src', 'cart.ts'), 'export function total(items: number[]): number {\n  return items.length;\n}\n');
+    await git(repo, ['add', '.']);
+    await git(repo, ['commit', '-m', 'initial']);
+
+    const [commit] = (await observe(store, repo))!.newCommits;
+    expect(commit?.subject).toBe('initial');
+    expect(commit?.parentCount).toBe(0);
+    expect(commit?.changedSymbols.map((symbol) => [symbol.filePath, symbol.name, symbol.changeKind])).toEqual([['src/cart.ts', 'total', 'added']]);
   });
 
   it('returns null for a directory outside any git repository', async () => {

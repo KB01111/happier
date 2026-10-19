@@ -115,6 +115,55 @@ describe('process evidence across several sessions', () => {
   });
 });
 
+describe('provider listing failures', () => {
+  it('leaves a provider\'s sessions untouched when its listing fails instead of settling them', async () => {
+    const { configDir, store } = await setup();
+    await sweep(store, configDir, [{ name: 'claude' }]);
+    const before = store.listSessions()[0];
+
+    await sweepExternalSessions({
+      store,
+      providers: [{
+        providerId: 'claude',
+        source: { kind: 'claudeConfig', configDir },
+        ops: { listCandidates: async () => { throw new Error('EACCES'); } },
+      }],
+      processes: [],
+      nowMs: Date.now() + 60 * 60 * 1000,
+      workingDirectoryCache: new Map(),
+      observeWorkingDirectory: async () => null,
+    });
+
+    expect(store.listSessions()[0]?.status).toBe(before?.status);
+  });
+
+  it('retries a working directory the provider could not resolve yet', async () => {
+    const { configDir, store } = await setup();
+    const cache = new Map<string, string | null>();
+    let lookups = 0;
+    const ops = {
+      ...claudeDirectSessionProviderOps,
+      getWorkingDirectory: async () => {
+        lookups += 1;
+        return lookups === 1 ? null : '/somewhere';
+      },
+    };
+    for (let index = 0; index < 2; index += 1) {
+      await sweepExternalSessions({
+        store,
+        providers: [{ providerId: 'claude', source: { kind: 'claudeConfig', configDir }, ops }],
+        processes: [],
+        nowMs: Date.now(),
+        workingDirectoryCache: cache,
+        observeWorkingDirectory: async () => null,
+      });
+    }
+
+    expect(lookups).toBe(2);
+    expect(store.listSessions()[0]?.workingDirectory).toBe('/somewhere');
+  });
+});
+
 describe('deriveObservedSessionStatus', () => {
   it('lets process evidence strengthen recent activity but never wake an idle session', () => {
     expect(deriveObservedSessionStatus({ activity: 'active_recently', providerProcessObserved: true }).status).toBe('running');

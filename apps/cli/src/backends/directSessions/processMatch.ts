@@ -44,12 +44,17 @@ export function pathContains(arg: string, needle: string): boolean {
   return normalizeSeparators(arg).includes(normalizeSeparators(needle));
 }
 
+const SCRIPT_INTERPRETERS = new Set(['node', 'nodejs', 'bun', 'deno', 'python', 'python3']);
+
 /**
- * The tokens a matcher inspects: the full argv when the platform exposes it, otherwise the process
- * name. Preferring argv keeps path-qualified look-alikes (an editor-bundled `codex` app-server) from
- * matching on their bare basename.
+ * The tokens a matcher inspects: the executable, plus the script it runs when the executable is an
+ * interpreter (an npm-installed agent runs as `node …/cli.js`). Other arguments are never matched,
+ * so `grep claude server.log` is not an agent. Without a command line (Windows), the process name.
  */
 export function processTokens(process: ObservedProcess): string[] {
   const argv = process.cmd?.split(/\s+/).filter(Boolean) ?? [];
-  return argv.length > 0 ? argv : [process.name];
+  const executable = argv[0];
+  if (!executable) return [process.name];
+  const executableName = stripExecutableSuffix(normalizeSeparators(executable).split('/').pop() ?? '').toLowerCase();
+  return SCRIPT_INTERPRETERS.has(executableName) && argv[1] ? [executable, argv[1]] : [executable];
 }

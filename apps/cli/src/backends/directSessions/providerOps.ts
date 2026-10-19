@@ -88,8 +88,8 @@ export type DirectSessionProviderOps = Readonly<{
   matchesProviderProcess?: (process: ObservedProcess) => boolean;
   /**
    * The source to sweep for background observation, present only when listing candidates from it
-   * is read-only and starts nothing (no provider server or agent process). Absent means the provider
-   * is not passively observed.
+   * with `searchMode: 'fast'` (how passive sweeps list) is read-only and starts nothing — no
+   * provider server or agent process. Absent means the provider is not passively observed.
    */
   passiveObservationSource?: () => DirectSessionsSource;
   pageTranscript?: (params: Readonly<{

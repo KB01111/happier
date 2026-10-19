@@ -1,6 +1,7 @@
 import { randomBytes as nodeRandomBytes } from 'node:crypto';
 
 import {
+  CodeIntelligenceSettingsV1Schema,
   decryptSecretValueWithKeysV1,
   normalizeCodeIntelligenceSettings,
   sealSecretsDeepV1,
@@ -40,16 +41,30 @@ function mergeIncomingProviderSecrets(
   return { ...next, remoteAnalysis: { ...next.remoteAnalysis, providers } };
 }
 
+/** Null when there is no account encryption material (signed out, or token-only credentials). */
+async function readSettingsSecretsKeys(): Promise<Readonly<{ writeKey: Uint8Array; readKeys: readonly Uint8Array[] }> | null> {
+  const credentials = await readCredentials();
+  if (!credentials) return null;
+  try {
+    return {
+      writeKey: deriveSettingsSecretsKeyForCredentials(credentials),
+      readKeys: deriveSettingsSecretsReadKeysForCredentials(credentials),
+    };
+  } catch {
+    return null;
+  }
+}
+
 export async function writeCodeIntelligenceSettingsToDisk(raw: unknown): Promise<CodeIntelligenceSettingsV1> {
   const previous = await readCodeIntelligenceSettingsFromDisk();
-  const merged = mergeIncomingProviderSecrets(previous, normalizeCodeIntelligenceSettings(raw));
-  const credentials = await readCredentials();
-  if (!credentials && merged.remoteAnalysis.providers.some((provider) => provider.apiKey?.value)) {
+  const merged = mergeIncomingProviderSecrets(previous, CodeIntelligenceSettingsV1Schema.parse(raw));
+  const keys = await readSettingsSecretsKeys();
+  if (!keys && merged.remoteAnalysis.providers.some((provider) => provider.apiKey?.value)) {
     // Without account key material a key could only be stored in plaintext; refuse instead.
-    throw new Error('Cannot store an analysis provider API key before this machine is signed in');
+    throw new Error('Cannot store an analysis provider API key without account encryption keys on this machine');
   }
-  const sealed = credentials
-    ? sealSecretsDeepV1(merged, deriveSettingsSecretsKeyForCredentials(credentials), (length) => new Uint8Array(nodeRandomBytes(length)))
+  const sealed = keys
+    ? sealSecretsDeepV1(merged, keys.writeKey, (length) => new Uint8Array(nodeRandomBytes(length)))
     : merged;
   await updateSettings((current) => ({ ...current, codeIntelligence: sealed }));
   return sealed;
@@ -57,7 +72,6 @@ export async function writeCodeIntelligenceSettingsToDisk(raw: unknown): Promise
 
 export async function resolveCodeIntelligenceProviderApiKey(provider: CodeIntelligenceAnalysisProviderV1): Promise<string | null> {
   if (!provider.apiKey) return null;
-  const credentials = await readCredentials();
-  const keys = credentials ? deriveSettingsSecretsReadKeysForCredentials(credentials) : [];
-  return decryptSecretValueWithKeysV1(provider.apiKey, keys);
+  const keys = await readSettingsSecretsKeys();
+  return decryptSecretValueWithKeysV1(provider.apiKey, keys?.readKeys ?? []);
 }

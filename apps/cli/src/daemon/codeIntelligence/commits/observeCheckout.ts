@@ -29,10 +29,15 @@ export async function observeCheckout(input: Readonly<{
   registrationSource: CodeIntelligenceRepositoryV1['registrationSource'];
   excludedPathPrefixes: readonly string[];
   resolvePlausibleSessionIds: (worktreePath: string) => string[];
+  /** The session whose sweep triggered this observation, before it is itself stored. */
+  additionalPlausibleSessionIds?: readonly string[];
+  /** Filesystem policy for the resolved checkout; a refused checkout is never registered. */
+  isCheckoutAllowed?: (checkout: ObservedCheckout) => boolean;
   nowMs: () => number;
 }>): Promise<CheckoutObservation | null> {
   const checkout = await resolveObservedCheckout({ cwd: input.cwd });
   if (!checkout) return null;
+  if (input.isCheckoutAllowed && !input.isCheckoutAllowed(checkout)) return null;
   const { store } = input;
   const observedAtMs = input.nowMs();
 
@@ -55,15 +60,7 @@ export async function observeCheckout(input: Readonly<{
     });
   }
 
-  const { previous } = store.upsertWorktree({
-    repositoryId: checkout.repositoryId,
-    worktreePath: checkout.worktreePath,
-    gitDirPath: checkout.gitDirPath,
-    isLinkedWorktree: checkout.isLinkedWorktree,
-    branch: checkout.branch,
-    headCommit: checkout.headCommit,
-    nowMs: observedAtMs,
-  });
+  const previous = store.getWorktree({ worktreePath: checkout.worktreePath });
   if (!previous) {
     store.appendEvent({
       kind: 'worktree_observed',
@@ -86,16 +83,23 @@ export async function observeCheckout(input: Readonly<{
     });
   }
 
+  // The HEAD checkpoint only moves once every commit it covers is recorded, so a git read that
+  // fails part-way is retried on the next observation instead of being skipped for good.
+  let checkpoint = previous ? previous.headCommit : checkout.headCommit;
   const newCommits: CodeIntelligenceCommitV1[] = [];
-  if (previous?.headCommit && checkout.headCommit && previous.headCommit !== checkout.headCommit) {
+  if (previous && checkout.headCommit && previous.headCommit !== checkout.headCommit) {
     const range = await listNewCommits({
       worktreePath: checkout.worktreePath,
       previousHead: previous.headCommit,
       currentHead: checkout.headCommit,
       maxCommits: MAX_COMMITS_PER_REF_UPDATE,
     });
-    const plausibleSessionIds = input.resolvePlausibleSessionIds(checkout.worktreePath);
-    for (const [index, sha] of range.shas.entries()) {
+    const plausibleSessionIds = [...new Set([
+      ...input.resolvePlausibleSessionIds(checkout.worktreePath),
+      ...(input.additionalPlausibleSessionIds ?? []),
+    ])];
+    let complete = range !== null;
+    for (const [index, sha] of (range?.shas ?? []).entries()) {
       if (store.getCommit({ repositoryId: checkout.repositoryId, sha })) continue;
       const commit = await buildCommitObservation({
         repositoryId: checkout.repositoryId,
@@ -106,7 +110,11 @@ export async function observeCheckout(input: Readonly<{
         plausibleSessionIds,
         nowMs: input.nowMs(),
       });
-      if (!commit || !store.insertCommitIfAbsent(commit)) continue;
+      if (!commit) {
+        complete = false;
+        break;
+      }
+      if (!store.insertCommitIfAbsent(commit)) continue;
       newCommits.push(commit);
       store.appendEvent({
         kind: 'commit_observed',
@@ -120,11 +128,22 @@ export async function observeCheckout(input: Readonly<{
           branch: commit.branch,
           changedFiles: commit.changedFiles.length,
           changedSymbols: commit.changedSymbols.length,
-          ...(index === 0 && range.omittedCount > 0 ? { omittedOlderCommits: range.omittedCount } : {}),
+          ...(index === 0 && range && range.omittedCount > 0 ? { omittedOlderCommits: range.omittedCount } : {}),
         },
       });
     }
+    if (complete) checkpoint = checkout.headCommit;
   }
+
+  store.upsertWorktree({
+    repositoryId: checkout.repositoryId,
+    worktreePath: checkout.worktreePath,
+    gitDirPath: checkout.gitDirPath,
+    isLinkedWorktree: checkout.isLinkedWorktree,
+    branch: checkout.branch,
+    headCommit: checkpoint,
+    nowMs: observedAtMs,
+  });
 
   return { checkout, newCommits };
 }

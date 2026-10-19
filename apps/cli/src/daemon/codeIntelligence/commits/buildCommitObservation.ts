@@ -39,9 +39,12 @@ export async function buildCommitObservation(input: Readonly<{
   plausibleSessionIds: readonly string[];
   nowMs: number;
 }>): Promise<CodeIntelligenceCommitV1 | null> {
+  // Null means git could not read the commit; the caller keeps its HEAD checkpoint and retries.
   const header = await readCommitHeader({ worktreePath: input.worktreePath, sha: input.sha });
   if (!header) return null;
   const changedFiles = await readCommitChangedFiles({ worktreePath: input.worktreePath, header });
+  // A failed read is retried on the next observation instead of storing an empty commit.
+  if (!changedFiles) return null;
   const baseSha = header.parents[0] ?? null;
 
   const scannable = changedFiles

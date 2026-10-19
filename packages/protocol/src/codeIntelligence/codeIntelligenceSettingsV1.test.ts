@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  CodeIntelligenceSettingsV1Schema,
   normalizeCodeIntelligenceSettings,
   redactCodeIntelligenceSettingsSecrets,
 } from './codeIntelligenceSettingsV1.js';
@@ -30,6 +31,15 @@ describe('code intelligence settings', () => {
 
     expect(settings.enabled).toBe(false);
     expect(settings.remoteAnalysis.enabled).toBe(false);
+  });
+
+  it('rejects an OpenAI-compatible provider without an endpoint', () => {
+    expect(CodeIntelligenceSettingsV1Schema.safeParse({
+      remoteAnalysis: { providers: [{ id: 'local', kind: 'openai_compatible', modelId: 'm', billing: 'free' }] },
+    }).success).toBe(false);
+    expect(CodeIntelligenceSettingsV1Schema.safeParse({
+      remoteAnalysis: { providers: [{ id: 'local', kind: 'openai_compatible', modelId: 'm', billing: 'free', baseUrl: 'http://127.0.0.1:8080/v1' }] },
+    }).success).toBe(true);
   });
 
   it('never returns key material to clients', () => {

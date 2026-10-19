@@ -1,6 +1,7 @@
 import { watch } from 'node:fs';
 import { join } from 'node:path';
 
+import { resolveMachineRpcWorkingDirectory } from '@/api/machine/resolveMachineRpcWorkingDirectory';
 import { listPassiveSessionObservationProviders } from '@/backends/catalog';
 import { configuration } from '@/configuration';
 import { listProcessSnapshot } from '@/daemon/processSnapshotCache';
@@ -9,6 +10,11 @@ import {
   resolveCodeIntelligenceProviderApiKey,
   writeCodeIntelligenceSettingsToDisk,
 } from '@/settings/codeIntelligenceSettings';
+import {
+  resolveFilesystemAccessPolicy,
+  resolveFilesystemPolicyDefaultDirectory,
+} from '@/rpc/handlers/fileSystem/accessPolicy/filesystemAccessPolicy';
+import { authorizeFilesystemPath } from '@/rpc/handlers/fileSystem/accessPolicy/filesystemPathAuthorization';
 import { logger } from '@/ui/logger';
 
 import { startCodeIntelligenceWorker, type CodeIntelligenceWorkerHandle } from './codeIntelligenceWorker';
@@ -18,7 +24,18 @@ import { startCodeIntelligenceWorker, type CodeIntelligenceWorkerHandle } from '
  * per-server daemon state so two daemons for different servers never share one writer.
  */
 export async function startDaemonCodeIntelligenceWorker(): Promise<CodeIntelligenceWorkerHandle> {
+  // The same policy that bounds the file browser and terminal bounds what the observer reads:
+  // a checkout is observed only when both its worktree and its git common dir are inside it.
+  const accessPolicy = resolveFilesystemAccessPolicy();
+  const defaultDirectory = resolveFilesystemPolicyDefaultDirectory({
+    defaultDirectory: resolveMachineRpcWorkingDirectory(),
+    accessPolicy,
+  });
+  const isPathAllowed = (targetPath: string) =>
+    authorizeFilesystemPath({ targetPath, defaultDirectory, accessPolicy }).valid;
+
   return await startCodeIntelligenceWorker({
+    isCheckoutAllowed: (checkout) => isPathAllowed(checkout.worktreePath) && isPathAllowed(checkout.commonDirPath),
     dbPath: join(configuration.activeServerDir, 'code-intelligence', 'code-intelligence.sqlite'),
     readSettings: readCodeIntelligenceSettingsFromDisk,
     writeSettings: writeCodeIntelligenceSettingsToDisk,

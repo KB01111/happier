@@ -43,6 +43,7 @@ export type CodeIntelligenceStore = Readonly<{
     headCommit: string | null;
     nowMs: number;
   }>) => Readonly<{ previous: CodeIntelligenceWorktreeV1 | null }>;
+  getWorktree: (key: Readonly<{ worktreePath: string }>) => CodeIntelligenceWorktreeV1 | null;
   listRepositories: () => CodeIntelligenceRepositoryV1[];
   upsertSession: (session: ObservedAgentSessionV1) => Readonly<{ previous: ObservedAgentSessionV1 | null }>;
   listSessions: () => ObservedAgentSessionV1[];
@@ -52,6 +53,8 @@ export type CodeIntelligenceStore = Readonly<{
   listRecentCommits: (input: Readonly<{ limit: number }>) => CodeIntelligenceCommitV1[];
   listCommitsWithAnalysisStatus: (input: Readonly<{ status: CodeIntelligenceCommitAnalysisV1['status']; limit: number }>) => CodeIntelligenceCommitV1[];
   appendEvent: (event: CodeIntelligenceActivityEventInput) => CodeIntelligenceActivityEventV1;
+  /** The newest `limit` events, oldest first: the starting point for a client without a cursor. */
+  listLatestEvents: (input: Readonly<{ limit: number }>) => Readonly<{ events: CodeIntelligenceActivityEventV1[]; latestSeq: number }>;
   listEventsAfter: (input: Readonly<{ afterSeq: number; limit: number }>) => Readonly<{
     events: CodeIntelligenceActivityEventV1[];
     latestSeq: number;
@@ -223,6 +226,10 @@ export function openCodeIntelligenceStore(params: Readonly<{ dbPath: string }>):
       );
       return { previous: previousRow ? worktreeFromRow(previousRow) : null };
     },
+    getWorktree: ({ worktreePath }) => {
+      const row = db.prepare('SELECT * FROM worktrees WHERE worktree_path = ?').get(worktreePath) as WorktreeRow | undefined;
+      return row ? worktreeFromRow(row) : null;
+    },
     listRepositories: () => {
       const repositories = db.prepare('SELECT * FROM repositories ORDER BY display_name, repository_id').all() as Array<{
         repository_id: string;
@@ -287,6 +294,10 @@ export function openCodeIntelligenceStore(params: Readonly<{ dbPath: string }>):
         VALUES (?, ?, ?, ?, ?, ?, ?)
       `).run(event.kind, event.atMs, event.repositoryId, event.worktreePath, event.sessionId, event.commitSha, JSON.stringify(parsedData));
       return { ...event, data: parsedData, seq: latestSeq() };
+    },
+    listLatestEvents: ({ limit }) => {
+      const rows = db.prepare('SELECT * FROM events ORDER BY seq DESC LIMIT ?').all(limit) as EventRow[];
+      return { events: rows.reverse().map(eventFromRow), latestSeq: latestSeq() };
     },
     listEventsAfter: ({ afterSeq, limit }) => {
       const rows = db.prepare('SELECT * FROM events WHERE seq > ? ORDER BY seq ASC LIMIT ?').all(afterSeq, limit) as EventRow[];

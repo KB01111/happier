@@ -106,6 +106,26 @@ describe('detectChangedSymbols', () => {
     }).map((symbol) => [symbol.name, symbol.kind, symbol.changeKind])).toEqual([['Serve', 'method', 'modified']]);
   });
 
+  it('attributes changes to Java and C# methods rather than only their class', () => {
+    const javaOld = 'public class Cart {\n    public int total(List<Integer> items) {\n        return items.size();\n    }\n}\n';
+    const javaNew = 'public class Cart {\n    public int total(List<Integer> items) {\n        return items.size() * 2;\n    }\n}\n';
+    expect(detectChangedSymbols({
+      path: 'src/Cart.java',
+      oldContent: javaOld,
+      newContent: javaNew,
+      hunks: parseZeroContextHunks('@@ -3 +3 @@'),
+    }).map((symbol) => [symbol.name, symbol.kind])).toEqual([['total', 'method']]);
+
+    const csOld = 'public class Cart\n{\n    public async Task<int> TotalAsync()\n    {\n        return 1;\n    }\n}\n';
+    const csNew = 'public class Cart\n{\n    public async Task<int> TotalAsync()\n    {\n        return 2;\n    }\n}\n';
+    expect(detectChangedSymbols({
+      path: 'Cart.cs',
+      oldContent: csOld,
+      newContent: csNew,
+      hunks: parseZeroContextHunks('@@ -5 +5 @@'),
+    }).map((symbol) => [symbol.name, symbol.kind])).toEqual([['TotalAsync', 'method']]);
+  });
+
   it('reports nothing for languages it cannot scan instead of guessing', () => {
     expect(detectChangedSymbols({
       path: 'README.md',

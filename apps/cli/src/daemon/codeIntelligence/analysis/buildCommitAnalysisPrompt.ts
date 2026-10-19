@@ -18,6 +18,11 @@ const SECRET_PATTERNS: readonly RegExp[] = [
   /\bgithub_pat_[A-Za-z0-9_]{30,}\b/g,
   /\bsk-[A-Za-z0-9_-]{20,}\b/g,
   /\bgsk_[A-Za-z0-9]{20,}\b/g,
+  /\bgl(?:pat|ptt|dt|rt|cbt|oas)-[A-Za-z0-9_-]{20,}\b/g,
+  /\bnpm_[A-Za-z0-9]{36}\b/g,
+  /\bhf_[A-Za-z0-9]{30,}\b/g,
+  /\bAIza[0-9A-Za-z_-]{35}\b/g,
+  /\b[rs]k_(?:live|test)_[A-Za-z0-9]{20,}\b/g,
   /\bxox[abposr]-[A-Za-z0-9-]{10,}\b/g,
   /\bBearer\s+[A-Za-z0-9._~+/-]{20,}=*/g,
   /((?:api[_-]?key|secret|token|password|passwd|auth)[\w-]*\s*[:=]\s*)(['"]?)[^'"\s]{8,}\2/gi,
@@ -64,7 +69,12 @@ export async function buildCommitAnalysisPrompt(input: Readonly<{
   const omitted: string[] = [];
   let diffBytes = 0;
   for (const file of commit.changedFiles) {
-    if (file.binary || isPathExcludedFromIntelligence(file.path, input.excludedPathPrefixes)) {
+    // A rename carries the old side's content too, so either path being excluded excludes the file.
+    const excluded = file.binary
+      || isPathExcludedFromIntelligence(file.path, input.excludedPathPrefixes)
+      || (file.previousPath !== null && isPathExcludedFromIntelligence(file.previousPath, input.excludedPathPrefixes));
+    // Once the budget is spent no more diffs are read: one git process per remaining file is waste.
+    if (excluded || diffBytes >= MAX_PROMPT_DIFF_BYTES) {
       omitted.push(file.path);
       continue;
     }
@@ -77,12 +87,13 @@ export async function buildCommitAnalysisPrompt(input: Readonly<{
       contextLines: 3,
       maxOutputBytes: MAX_FILE_DIFF_BYTES,
     });
-    if (diff === null || diffBytes + diff.length > MAX_PROMPT_DIFF_BYTES) {
+    const size = diff === null ? 0 : Buffer.byteLength(diff, 'utf8');
+    if (diff === null || diffBytes + size > MAX_PROMPT_DIFF_BYTES) {
       omitted.push(file.path);
       continue;
     }
     diffs.push(diff);
-    diffBytes += diff.length;
+    diffBytes += size;
   }
 
   const symbols = commit.changedSymbols.map((symbol) => `- ${symbol.changeKind} ${symbol.kind} ${symbol.name} (${symbol.filePath}:${symbol.startLine}-${symbol.endLine})`);

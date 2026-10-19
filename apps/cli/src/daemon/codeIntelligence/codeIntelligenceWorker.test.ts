@@ -130,6 +130,55 @@ describe('code intelligence worker', () => {
     expect(snapshot.ok && snapshot.commits[0]?.analysis.status).toBe('skipped');
   });
 
+  it('pages events without skipping any and starts a fresh client at the newest events', async () => {
+    const { root } = await setupRepo();
+    const deps = buildDeps(root, { enabled: true }, new Map());
+    const { openCodeIntelligenceStore } = await import('./store/codeIntelligenceStore');
+    const seeded = openCodeIntelligenceStore({ dbPath: deps.dbPath });
+    for (let index = 0; index < 250; index += 1) {
+      seeded.appendEvent({ kind: 'session_observed', atMs: Date.now(), repositoryId: null, worktreePath: null, sessionId: `s${index}`, commitSha: null, data: {} });
+    }
+    seeded.close();
+    const worker = await start(deps);
+
+    const initial = worker.getSnapshot({ eventLimit: 200 });
+    expect(initial.ok && [initial.events[0]?.seq, initial.events.at(-1)?.seq, initial.latestSeq]).toEqual([51, 250, 250]);
+
+    const firstPage = worker.getSnapshot({ afterSeq: 0, eventLimit: 200 });
+    expect(firstPage.ok && [firstPage.events.length, firstPage.latestSeq]).toEqual([200, 200]);
+    const secondPage = worker.getSnapshot({ afterSeq: firstPage.ok ? firstPage.latestSeq : 0, eventLimit: 200 });
+    expect(secondPage.ok && [secondPage.events[0]?.seq, secondPage.events.at(-1)?.seq, secondPage.latestSeq]).toEqual([201, 250, 250]);
+  });
+
+  it('never registers a checkout the machine filesystem policy refuses', async () => {
+    const { root, repo } = await setupRepo();
+    const worker = await start({ ...buildDeps(root, { enabled: true }, new Map()), isCheckoutAllowed: () => false });
+
+    expect(await worker.registerRepository(repo)).toMatchObject({ ok: false });
+    const snapshot = worker.getSnapshot({});
+    expect(snapshot.ok && snapshot.repositories).toEqual([]);
+  });
+
+  it('rejects an invalid settings payload instead of resetting everything to defaults', async () => {
+    const { root } = await setupRepo();
+    const worker = await start(buildDeps(root, { enabled: true, retentionDays: 7 }, new Map()));
+
+    await expect(worker.setSettings(null)).rejects.toThrow();
+    await expect(worker.setSettings({ enabled: 'yes' })).rejects.toThrow();
+    expect(worker.getSettings()).toMatchObject({ enabled: true, retentionDays: 7 });
+  });
+
+  it('shares one review between repeated requests for the same commit', async () => {
+    const { root } = await setupRepo();
+    const worker = await start(buildDeps(root, { enabled: true }, new Map()));
+
+    const first = worker.requestCommitAnalysis({ repositoryId: 'r', sha: 'a'.repeat(40) });
+    const second = worker.requestCommitAnalysis({ repositoryId: 'r', sha: 'a'.repeat(40) });
+
+    expect(second).toBe(first);
+    await first;
+  });
+
   it('never hands API keys back to clients', async () => {
     const { root } = await setupRepo();
     const worker = await start(buildDeps(root, { enabled: true }, new Map()));

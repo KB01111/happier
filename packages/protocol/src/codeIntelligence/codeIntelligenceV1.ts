@@ -271,6 +271,10 @@ export const CodeIntelligenceSnapshotResponseV1Schema = z.union([
       sessions: z.array(ObservedAgentSessionV1Schema),
       commits: z.array(CodeIntelligenceCommitV1Schema),
       events: z.array(CodeIntelligenceActivityEventV1Schema),
+      /**
+       * Resume cursor: pass it back as `afterSeq`. It is the last event returned (or the store's
+       * newest sequence when nothing was pending), never past events this page did not include.
+       */
       latestSeq: z.number().int().nonnegative(),
       /**
        * True when `afterSeq` precedes the oldest retained event: the client missed events that

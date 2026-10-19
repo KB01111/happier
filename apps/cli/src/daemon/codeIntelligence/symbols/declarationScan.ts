@@ -109,7 +109,15 @@ const JVM_PATTERNS: ReadonlyArray<readonly [RegExp, CodeIntelligenceSymbolKindV1
   [/^\s*(?:(?:public|private|protected|internal|override|suspend|inline|open)\s+)*fun\s+(?:<[^>]*>\s*)?(?:[A-Za-z_][\w.]*\.)?([A-Za-z_]\w*)/, 'function'],
 ];
 
-const jvmMatcher: LineMatcher = (line) => firstMatch(line, JVM_PATTERNS);
+// Java/C# methods need at least one modifier, which keeps statements and calls from matching.
+const JVM_METHOD = /^\s+(?:(?:public|private|protected|internal|static|final|abstract|synchronized|override|virtual|async|sealed|partial|new|extern|unsafe|native|default)\s+)+(?:[\w<>[\],.?]+\s+)+?([A-Za-z_]\w*)\s*\(/;
+
+const jvmMatcher: LineMatcher = (line, indent) => {
+  const declaration = firstMatch(line, JVM_PATTERNS);
+  if (declaration) return declaration;
+  const method = indent > 0 ? JVM_METHOD.exec(line) : null;
+  return method?.[1] && !CONTROL_KEYWORDS.has(method[1]) ? { name: method[1], kind: 'method' } : null;
+};
 
 const MATCHERS: Record<LanguageId, LineMatcher> = {
   typescript: typescriptMatcher,
@@ -132,6 +140,11 @@ function findBlockEnd(lines: readonly string[], startIndex: number, startIndent:
     if (!trimmed) continue;
     const indent = leadingWhitespaceLength(line);
     if (indent > startIndent) {
+      lastIncluded = index;
+      continue;
+    }
+    // A brace on its own line at the declaration's indent (C# and Allman style) opens its body.
+    if (indent === startIndent && trimmed === '{') {
       lastIncluded = index;
       continue;
     }

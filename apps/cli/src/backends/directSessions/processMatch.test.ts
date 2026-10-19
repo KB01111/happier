@@ -24,5 +24,8 @@ describe('direct-session provider process recognition', () => {
       cmd: '/home/dev/.vscode/extensions/openai.chatgpt/bin/linux-x86_64/codex app-server',
     })).toBe(false);
     expect(openCodeDirectSessionProviderOps.matchesProviderProcess?.({ name: 'bash', cmd: 'bash -c ls' })).toBe(false);
+    // Arguments of unrelated commands are not executables.
+    expect(claudeDirectSessionProviderOps.matchesProviderProcess?.({ name: 'grep', cmd: 'grep claude server.log' })).toBe(false);
+    expect(codexDirectSessionProviderOps.matchesProviderProcess?.({ name: 'less', cmd: 'less /home/dev/.npm/@openai/codex-linux/README.md' })).toBe(false);
   });
 });

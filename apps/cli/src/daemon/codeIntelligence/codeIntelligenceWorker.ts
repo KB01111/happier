@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 
 import {
+  CodeIntelligenceSettingsV1Schema,
   redactCodeIntelligenceSettingsSecrets,
   type CodeIntelligenceAnalysisProviderV1,
   type CodeIntelligenceCommitAnalyzeResponseV1,
@@ -50,6 +51,8 @@ export type CodeIntelligenceWorkerDeps = Readonly<{
   resolveApiKey: (provider: CodeIntelligenceAnalysisProviderV1) => Promise<string | null>;
   resolveSessionProviders: () => Promise<ObservedSessionProvider[]>;
   listProcesses: () => Promise<ObservedProcess[]>;
+  /** The machine's filesystem access policy, applied to every resolved worktree and git dir. */
+  isCheckoutAllowed?: (checkout: ObservedCheckout) => boolean;
   /** Watches one directory (non-recursively); returns a closer, or null when watching failed. */
   watchDirectory: (path: string, onChange: () => void) => (() => void) | null;
   fetchImpl: typeof fetch;
@@ -90,6 +93,7 @@ export async function startCodeIntelligenceWorker(deps: CodeIntelligenceWorkerDe
   const debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const workingDirectoryCache = new Map<string, string | null>();
   const unavailableUntilMsByProviderId = new Map<string, number>();
+  const pendingAnalysisRequests = new Map<string, Promise<CodeIntelligenceCommitAnalyzeResponseV1>>();
 
   const serialize = <T>(task: () => Promise<T>): Promise<T> => {
     const run = chain.then(task, task);
@@ -127,7 +131,11 @@ export async function startCodeIntelligenceWorker(deps: CodeIntelligenceWorkerDe
     else recordError('watch unavailable', new Error(`could not watch ${target}; relying on periodic reconcile`));
   };
 
-  const observeWorktree = async (cwd: string, source: 'session' | 'manual'): Promise<ObservedCheckout | null> => {
+  const observeWorktree = async (
+    cwd: string,
+    source: 'session' | 'manual',
+    additionalPlausibleSessionIds: readonly string[] = [],
+  ): Promise<ObservedCheckout | null> => {
     if (!store) return null;
     const result = await observeCheckout({
       store,
@@ -135,6 +143,8 @@ export async function startCodeIntelligenceWorker(deps: CodeIntelligenceWorkerDe
       registrationSource: source,
       excludedPathPrefixes: settings.excludedPathPrefixes,
       resolvePlausibleSessionIds: plausibleSessionIdsFor(store),
+      additionalPlausibleSessionIds,
+      isCheckoutAllowed: deps.isCheckoutAllowed,
       nowMs: deps.nowMs,
     });
     if (result) ensureWatcher(result.checkout);
@@ -150,13 +160,23 @@ export async function startCodeIntelligenceWorker(deps: CodeIntelligenceWorkerDe
     for (const commit of due) {
       if (!store || stopped) return;
       state = 'analyzing';
-      await analyzeCommit({
-        store,
-        settings,
-        commit,
-        unavailableUntilMsByProviderId,
-        deps: { fetchImpl: deps.fetchImpl, nowMs: deps.nowMs, resolveApiKey: deps.resolveApiKey },
-      });
+      try {
+        await analyzeCommit({
+          store,
+          settings,
+          commit,
+          unavailableUntilMsByProviderId,
+          deps: { fetchImpl: deps.fetchImpl, nowMs: deps.nowMs, resolveApiKey: deps.resolveApiKey },
+        });
+      } catch (error) {
+        // A job that throws is closed as failed, never left `analyzing` until the next restart.
+        recordError(`analysis of ${commit.sha} failed`, error);
+        store.updateCommitAnalysis({
+          repositoryId: commit.repositoryId,
+          sha: commit.sha,
+          analysis: { ...commit.analysis, status: 'failed', reason: 'internal_error', updatedAtMs: deps.nowMs() },
+        });
+      }
     }
   };
 
@@ -172,7 +192,7 @@ export async function startCodeIntelligenceWorker(deps: CodeIntelligenceWorkerDe
           processes: await deps.listProcesses().catch(() => []),
           nowMs: deps.nowMs(),
           workingDirectoryCache,
-          observeWorkingDirectory: async (cwd, sessionActive) => {
+          observeWorkingDirectory: async (cwd, sessionActive, sessionId) => {
             // Idle sessions in an already-known checkout reuse the stored association.
             const known = store?.listRepositories().find((repository) => repository.worktrees.some((worktree) => worktree.worktreePath === cwd));
             if (known && !sessionActive) {
@@ -189,7 +209,7 @@ export async function startCodeIntelligenceWorker(deps: CodeIntelligenceWorkerDe
               };
             }
             knownWorktrees.delete(cwd);
-            return await observeWorktree(cwd, 'session');
+            return await observeWorktree(cwd, 'session', sessionActive ? [sessionId] : []);
           },
         });
         for (const failure of sweep.providerErrors) recordError(`session discovery for ${failure.providerId} failed`, new Error(failure.message));
@@ -242,13 +262,38 @@ export async function startCodeIntelligenceWorker(deps: CodeIntelligenceWorkerDe
     state = 'disabled';
   };
 
+  const requestCommitAnalysisNow = ({ repositoryId, sha }: Readonly<{ repositoryId: string; sha: string }>): Promise<CodeIntelligenceCommitAnalyzeResponseV1> => serialize(async () => {
+    if (!store) return DISABLED_RESPONSE;
+    const commit = store.getCommit({ repositoryId, sha });
+    if (!commit) return { ok: false, errorCode: 'commit_not_found', error: 'commit is not observed' } as const;
+    // Manual reanalysis is an explicit user request: it resets the retry schedule but still goes
+    // through the same admission policy as automatic analysis.
+    unavailableUntilMsByProviderId.clear();
+    await analyzeCommit({
+      store,
+      settings,
+      commit: { ...commit, analysis: { ...commit.analysis, attempts: 0, retryAfterMs: null } },
+      unavailableUntilMsByProviderId,
+      deps: { fetchImpl: deps.fetchImpl, nowMs: deps.nowMs, resolveApiKey: deps.resolveApiKey },
+    });
+    return { ok: true, commit: store.getCommit({ repositoryId, sha })! };
+  });
+
   if (settings.enabled) activate();
 
   return {
     getStatus: () => ({ state, lastSweepAtMs, lastError }),
     getSnapshot: (request) => {
       if (!store) return DISABLED_RESPONSE;
-      const page = store.listEventsAfter({ afterSeq: request.afterSeq ?? 0, limit: request.eventLimit ?? DEFAULT_SNAPSHOT_EVENTS });
+      const limit = request.eventLimit ?? DEFAULT_SNAPSHOT_EVENTS;
+      // Without a cursor a client starts from the newest events; with one it pages forward, and the
+      // returned cursor is the last event it received so no page is ever skipped.
+      const page = request.afterSeq === undefined
+        ? { ...store.listLatestEvents({ limit }), truncated: false }
+        : store.listEventsAfter({ afterSeq: request.afterSeq, limit });
+      const cursor = request.afterSeq === undefined || page.events.length === 0
+        ? page.latestSeq
+        : page.events.at(-1)!.seq;
       return {
         ok: true,
         worker: { state, lastSweepAtMs, lastError },
@@ -256,7 +301,7 @@ export async function startCodeIntelligenceWorker(deps: CodeIntelligenceWorkerDe
         sessions: store.listSessions(),
         commits: store.listRecentCommits({ limit: request.commitLimit ?? DEFAULT_SNAPSHOT_COMMITS }),
         events: page.events,
-        latestSeq: page.latestSeq,
+        latestSeq: cursor,
         eventsTruncated: request.afterSeq !== undefined && page.truncated,
       };
     },
@@ -269,24 +314,20 @@ export async function startCodeIntelligenceWorker(deps: CodeIntelligenceWorkerDe
         ? { ok: true, repository }
         : { ok: false, errorCode: 'internal_error', error: 'repository was not recorded' } as const;
     }),
-    requestCommitAnalysis: ({ repositoryId, sha }) => serialize(async () => {
-      if (!store) return DISABLED_RESPONSE;
-      const commit = store.getCommit({ repositoryId, sha });
-      if (!commit) return { ok: false, errorCode: 'commit_not_found', error: 'commit is not observed' } as const;
-      // Manual reanalysis is an explicit user request: it resets the retry schedule but still goes
-      // through the same admission policy as automatic analysis.
-      unavailableUntilMsByProviderId.clear();
-      await analyzeCommit({
-        store,
-        settings,
-        commit: { ...commit, analysis: { ...commit.analysis, attempts: 0, retryAfterMs: null } },
-        unavailableUntilMsByProviderId,
-        deps: { fetchImpl: deps.fetchImpl, nowMs: deps.nowMs, resolveApiKey: deps.resolveApiKey },
-      });
-      return { ok: true, commit: store.getCommit({ repositoryId, sha })! };
-    }),
+    requestCommitAnalysis: ({ repositoryId, sha }) => {
+      // Repeated requests for the same commit while one is pending share it: one review, one charge.
+      const key = `${repositoryId}:${sha}`;
+      const pending = pendingAnalysisRequests.get(key);
+      if (pending) return pending;
+      const request = requestCommitAnalysisNow({ repositoryId, sha })
+        .finally(() => pendingAnalysisRequests.delete(key));
+      pendingAnalysisRequests.set(key, request);
+      return request;
+    },
     getSettings: () => redactCodeIntelligenceSettingsSecrets(settings),
     setSettings: (raw) => serialize(async () => {
+      // Validate before persisting: an invalid payload is an error, never a reset to defaults.
+      CodeIntelligenceSettingsV1Schema.parse(raw);
       settings = await deps.writeSettings(raw);
       if (settings.enabled) activate();
       else deactivate();

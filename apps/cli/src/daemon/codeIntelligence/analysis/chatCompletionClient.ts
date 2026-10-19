@@ -21,7 +21,14 @@ export function resolveChatCompletionBaseUrl(kind: CodeIntelligenceAnalysisProvi
 export type ChatCompletionResult =
   | Readonly<{ ok: true; content: string; inputTokens: number | null; outputTokens: number | null }>
   | Readonly<{ ok: false; kind: 'rate_limited'; retryAfterMs: number | null; status: number }>
-  | Readonly<{ ok: false; kind: 'unavailable' | 'rejected' | 'invalid_response'; status: number | null; message: string }>;
+  | Readonly<{
+    ok: false;
+    kind: 'unavailable' | 'rejected' | 'invalid_response';
+    status: number | null;
+    message: string;
+    /** Present when the provider completed (and so may have billed) a request it answered unusably. */
+    billed?: Readonly<{ inputTokens: number | null; outputTokens: number | null }>;
+  }>;
 
 /** `Retry-After` is either delta-seconds or an HTTP date (RFC 9110 §10.2.3). */
 export function parseRetryAfterMs(value: string | null, nowMs: number): number | null {
@@ -43,8 +50,20 @@ export async function requestChatCompletion(input: Readonly<{
   fetchImpl: typeof fetch;
   nowMs: () => number;
 }>): Promise<ChatCompletionResult> {
+  // One deadline covers the whole exchange: headers can arrive promptly while the body stalls.
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), input.timeoutMs);
+  try {
+    return await exchange(input, controller.signal);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function exchange(
+  input: Parameters<typeof requestChatCompletion>[0],
+  signal: AbortSignal,
+): Promise<ChatCompletionResult> {
   let response: Response;
   try {
     response = await input.fetchImpl(`${input.baseUrl}/chat/completions`, {
@@ -63,12 +82,10 @@ export async function requestChatCompletion(input: Readonly<{
         max_tokens: input.maxOutputTokens,
         response_format: { type: 'json_object' },
       }),
-      signal: controller.signal,
+      signal,
     });
   } catch (error) {
     return { ok: false, kind: 'unavailable', status: null, message: error instanceof Error ? error.message : String(error) };
-  } finally {
-    clearTimeout(timer);
   }
 
   if (response.status === 429) {
@@ -82,17 +99,29 @@ export async function requestChatCompletion(input: Readonly<{
     return { ok: false, kind: 'rejected', status: response.status, message: `provider rejected the request (${response.status})` };
   }
 
+  let text: string;
+  try {
+    text = await response.text();
+  } catch (error) {
+    return { ok: false, kind: 'unavailable', status: response.status, message: error instanceof Error ? error.message : String(error) };
+  }
   let body: unknown;
   try {
-    body = await response.json();
+    body = JSON.parse(text);
   } catch {
     return { ok: false, kind: 'invalid_response', status: response.status, message: 'response was not JSON' };
   }
-  const record = body as { choices?: Array<{ message?: { content?: unknown } }>; usage?: { prompt_tokens?: unknown; completion_tokens?: unknown } };
-  const content = record.choices?.[0]?.message?.content;
-  if (typeof content !== 'string' || content.trim().length === 0) {
-    return { ok: false, kind: 'invalid_response', status: response.status, message: 'response had no message content' };
+  if (!body || typeof body !== 'object') {
+    return { ok: false, kind: 'invalid_response', status: response.status, message: 'response was not a JSON object' };
   }
+  const record = body as { choices?: unknown; usage?: { prompt_tokens?: unknown; completion_tokens?: unknown } | null };
+  const firstChoice = Array.isArray(record.choices) ? record.choices[0] as { message?: { content?: unknown } } | null : null;
+  const content = firstChoice?.message?.content;
   const toCount = (value: unknown) => (typeof value === 'number' && Number.isFinite(value) ? Math.max(0, Math.trunc(value)) : null);
-  return { ok: true, content, inputTokens: toCount(record.usage?.prompt_tokens), outputTokens: toCount(record.usage?.completion_tokens) };
+  const inputTokens = toCount(record.usage?.prompt_tokens);
+  const outputTokens = toCount(record.usage?.completion_tokens);
+  if (typeof content !== 'string' || content.trim().length === 0) {
+    return { ok: false, kind: 'invalid_response', status: response.status, message: 'response had no message content', billed: { inputTokens, outputTokens } };
+  }
+  return { ok: true, content, inputTokens, outputTokens };
 }

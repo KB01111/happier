@@ -61,19 +61,23 @@ export async function sweepExternalSessions(input: Readonly<{
   nowMs: number;
   /** Cached per observation id: a provider session's working directory never changes. */
   workingDirectoryCache: Map<string, string | null>;
-  observeWorkingDirectory: (cwd: string, sessionActive: boolean) => Promise<ObservedCheckout | null>;
+  /** `sessionId` is the swept session, so commits found while observing it can name it. */
+  observeWorkingDirectory: (cwd: string, sessionActive: boolean, sessionId: string) => Promise<ObservedCheckout | null>;
 }>): Promise<SessionSweepResult> {
   const { store, nowMs } = input;
   const previousById = new Map(store.listSessions().map((session) => [session.id, session]));
   const observedSessionIds: string[] = [];
   const providerErrors: Array<Readonly<{ providerId: string; message: string }>> = [];
+  const failedProviderIds = new Set<string>();
 
   for (const provider of input.providers) {
     let candidates;
     try {
-      candidates = (await provider.ops.listCandidates({ source: provider.source, limit: CANDIDATES_PER_PROVIDER })).candidates;
+      // `fast` lists from the provider's own files only (for Codex: rollouts, never an app-server).
+      candidates = (await provider.ops.listCandidates({ source: provider.source, limit: CANDIDATES_PER_PROVIDER, searchMode: 'fast' })).candidates;
     } catch (error) {
       providerErrors.push({ providerId: provider.providerId, message: error instanceof Error ? error.message : String(error) });
+      failedProviderIds.add(provider.providerId);
       continue;
     }
     const matchingProcessCount = provider.ops.matchesProviderProcess
@@ -87,17 +91,18 @@ export async function sweepExternalSessions(input: Readonly<{
     for (const candidate of candidates) {
       if (candidate.archived || nowMs - candidate.updatedAtMs > OBSERVED_SESSION_RECENCY_WINDOW_MS) continue;
       const id = `${provider.providerId}:${candidate.remoteSessionId}`;
-      let workingDirectory = input.workingDirectoryCache.get(id);
-      if (workingDirectory === undefined) {
+      // Only resolved directories are cached; an unresolved one is asked for again next sweep.
+      let workingDirectory = input.workingDirectoryCache.get(id) ?? null;
+      if (!workingDirectory) {
         workingDirectory = await provider.ops.getWorkingDirectory?.({ source: provider.source, remoteSessionId: candidate.remoteSessionId }).catch(() => null) ?? null;
-        input.workingDirectoryCache.set(id, workingDirectory);
+        if (workingDirectory) input.workingDirectoryCache.set(id, workingDirectory);
       }
       const { status, confidence } = deriveObservedSessionStatus({
         activity: candidate.activity ?? deriveDirectSessionActivityFromTimestamp({ updatedAtMs: candidate.updatedAtMs, nowMs }),
         providerProcessObserved,
       });
       const checkout = workingDirectory
-        ? await input.observeWorkingDirectory(workingDirectory, status === 'running' || status === 'active_recently')
+        ? await input.observeWorkingDirectory(workingDirectory, status === 'running' || status === 'active_recently', id)
         : null;
       const previous = previousById.get(id) ?? null;
       const session: ObservedAgentSessionV1 = {
@@ -126,7 +131,8 @@ export async function sweepExternalSessions(input: Readonly<{
   // nothing stays "running" just because no later sweep listed it.
   const listed = new Set(observedSessionIds);
   for (const previous of previousById.values()) {
-    if (listed.has(previous.id) || (previous.status !== 'running' && previous.status !== 'active_recently')) continue;
+    if (listed.has(previous.id) || failedProviderIds.has(previous.providerId)) continue;
+    if (previous.status !== 'running' && previous.status !== 'active_recently') continue;
     const { status, confidence } = deriveObservedSessionStatus({
       activity: deriveDirectSessionActivityFromTimestamp({ updatedAtMs: previous.lastActivityAtMs, nowMs }),
       providerProcessObserved: false,
