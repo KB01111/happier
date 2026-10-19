@@ -103,6 +103,18 @@ describe('sweepExternalSessions', () => {
   });
 });
 
+describe('process evidence across several sessions', () => {
+  it('does not mark every recently written session running when fewer agent processes are alive', async () => {
+    const { configDir, sessionFile, store } = await setup();
+    const second = sessionFile.replace(SESSION_ID, '1a2b3c4d-0000-4000-8000-000000000002');
+    await writeFile(second, `${JSON.stringify({ type: 'user', cwd: process.cwd(), message: { role: 'user', content: 'Other task' } })}\n`);
+
+    await sweep(store, configDir, [{ name: 'claude' }]);
+
+    expect(store.listSessions().map((session) => session.status)).toEqual(['active_recently', 'active_recently']);
+  });
+});
+
 describe('deriveObservedSessionStatus', () => {
   it('lets process evidence strengthen recent activity but never wake an idle session', () => {
     expect(deriveObservedSessionStatus({ activity: 'active_recently', providerProcessObserved: true }).status).toBe('running');

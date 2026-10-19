@@ -76,9 +76,13 @@ export async function sweepExternalSessions(input: Readonly<{
       providerErrors.push({ providerId: provider.providerId, message: error instanceof Error ? error.message : String(error) });
       continue;
     }
-    const providerProcessObserved = provider.ops.matchesProviderProcess
-      ? input.processes.some((process) => provider.ops.matchesProviderProcess!(process))
-      : false;
+    const matchingProcessCount = provider.ops.matchesProviderProcess
+      ? input.processes.filter((process) => provider.ops.matchesProviderProcess!(process)).length
+      : 0;
+    // A process proves the agent runs, not which session it serves. It only strengthens recent
+    // activity when there are at least as many live agent processes as recently written sessions.
+    const recentlyActiveCount = candidates.filter((candidate) => candidate.activity === 'active_recently').length;
+    const providerProcessObserved = matchingProcessCount > 0 && matchingProcessCount >= recentlyActiveCount;
 
     for (const candidate of candidates) {
       if (candidate.archived || nowMs - candidate.updatedAtMs > OBSERVED_SESSION_RECENCY_WINDOW_MS) continue;

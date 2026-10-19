@@ -71,7 +71,8 @@ export const CodeIntelligenceSettingsV1Schema = z
     enabled: z.boolean().default(false),
     /** Observe sessions started outside Happier through the direct-sessions provider stores. */
     externalSessionDiscovery: z.boolean().default(true),
-    /** Repository-relative glob-like path prefixes that are never read for analysis. */
+    // Repository-relative path prefixes never scanned or sent for analysis; `*`, `**` and `?` act
+    // as globs (for example `**/secrets/`).
     excludedPathPrefixes: z.array(z.string().trim().min(1).max(1000)).max(200).default([]),
     /** Activity events and commit observations older than this are pruned from the local store. */
     retentionDays: z.number().int().min(1).max(3650).default(30),
