@@ -6,6 +6,7 @@ import {
   redactCodeIntelligenceSettingsSecrets,
   type CodeIntelligenceAnalysisProviderV1,
   type CodeIntelligenceCommitAnalyzeResponseV1,
+  type CodeIntelligenceCommitV1,
   type CodeIntelligenceRepositoryRegisterResponseV1,
   type CodeIntelligenceSettingsV1,
   type CodeIntelligenceSnapshotRequestV1,
@@ -151,6 +152,26 @@ export async function startCodeIntelligenceWorker(deps: CodeIntelligenceWorkerDe
     return result?.checkout ?? null;
   };
 
+  const runAnalysis = async (activeStore: CodeIntelligenceStore, commit: CodeIntelligenceCommitV1) => {
+    try {
+      await analyzeCommit({
+        store: activeStore,
+        settings,
+        commit,
+        unavailableUntilMsByProviderId,
+        deps: { fetchImpl: deps.fetchImpl, nowMs: deps.nowMs, resolveApiKey: deps.resolveApiKey },
+      });
+    } catch (error) {
+      // An analysis that throws is closed as failed, never left `analyzing` until the next restart.
+      recordError(`analysis of ${commit.sha} failed`, error);
+      activeStore.updateCommitAnalysis({
+        repositoryId: commit.repositoryId,
+        sha: commit.sha,
+        analysis: { ...commit.analysis, status: 'failed', reason: 'internal_error', updatedAtMs: deps.nowMs() },
+      });
+    }
+  };
+
   const drainAnalysisQueue = async () => {
     if (!store) return;
     const now = deps.nowMs();
@@ -160,23 +181,7 @@ export async function startCodeIntelligenceWorker(deps: CodeIntelligenceWorkerDe
     for (const commit of due) {
       if (!store || stopped) return;
       state = 'analyzing';
-      try {
-        await analyzeCommit({
-          store,
-          settings,
-          commit,
-          unavailableUntilMsByProviderId,
-          deps: { fetchImpl: deps.fetchImpl, nowMs: deps.nowMs, resolveApiKey: deps.resolveApiKey },
-        });
-      } catch (error) {
-        // A job that throws is closed as failed, never left `analyzing` until the next restart.
-        recordError(`analysis of ${commit.sha} failed`, error);
-        store.updateCommitAnalysis({
-          repositoryId: commit.repositoryId,
-          sha: commit.sha,
-          analysis: { ...commit.analysis, status: 'failed', reason: 'internal_error', updatedAtMs: deps.nowMs() },
-        });
-      }
+      await runAnalysis(store, commit);
     }
   };
 
@@ -269,13 +274,7 @@ export async function startCodeIntelligenceWorker(deps: CodeIntelligenceWorkerDe
     // Manual reanalysis is an explicit user request: it resets the retry schedule but still goes
     // through the same admission policy as automatic analysis.
     unavailableUntilMsByProviderId.clear();
-    await analyzeCommit({
-      store,
-      settings,
-      commit: { ...commit, analysis: { ...commit.analysis, attempts: 0, retryAfterMs: null } },
-      unavailableUntilMsByProviderId,
-      deps: { fetchImpl: deps.fetchImpl, nowMs: deps.nowMs, resolveApiKey: deps.resolveApiKey },
-    });
+    await runAnalysis(store, { ...commit, analysis: { ...commit.analysis, attempts: 0, retryAfterMs: null } });
     return { ok: true, commit: store.getCommit({ repositoryId, sha })! };
   });
 

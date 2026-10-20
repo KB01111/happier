@@ -103,9 +103,10 @@ export async function listNewCommits(input: Readonly<{
 }>): Promise<NewCommitRange | null> {
   if (input.previousHead === input.currentHead) return { shas: [], omittedCount: 0 };
   const exclusion = input.previousHead ? [`^${input.previousHead}`] : [];
+  // Listing only the kept commits keeps the output bounded however large the range is.
   const result = await runObserverGit({
     cwd: input.worktreePath,
-    args: ['rev-list', input.currentHead, ...exclusion, '--'],
+    args: ['rev-list', `--max-count=${input.maxCommits}`, input.currentHead, ...exclusion, '--'],
   });
   if (!result.success) {
     // Only a previous head that no longer exists (gc after a rewrite) falls back to the new head
@@ -113,9 +114,14 @@ export async function listNewCommits(input: Readonly<{
     const previousExists = input.previousHead ? await commitExists(input.worktreePath, input.previousHead) : null;
     return previousExists === false ? { shas: [input.currentHead], omittedCount: 0 } : null;
   }
-  const newestFirst = result.stdout.split('\n').map((line) => line.trim()).filter(Boolean);
-  const kept = newestFirst.slice(0, input.maxCommits);
-  return { shas: kept.reverse(), omittedCount: Math.max(0, newestFirst.length - kept.length) };
+  const kept = result.stdout.split('\n').map((line) => line.trim()).filter(Boolean);
+  let omittedCount = 0;
+  if (kept.length === input.maxCommits) {
+    const counted = await runObserverGit({ cwd: input.worktreePath, args: ['rev-list', '--count', input.currentHead, ...exclusion, '--'] });
+    if (!counted.success) return null;
+    omittedCount = Math.max(0, Number.parseInt(counted.stdout.trim(), 10) - kept.length);
+  }
+  return { shas: kept.reverse(), omittedCount };
 }
 
 export type CommitHeader = Readonly<{

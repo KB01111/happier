@@ -179,6 +179,36 @@ describe('code intelligence worker', () => {
     await first;
   });
 
+  it('closes a manual review that throws as failed instead of leaving it analyzing', async () => {
+    const { root, repo } = await setupRepo();
+    const deps: CodeIntelligenceWorkerDeps = {
+      ...buildDeps(root, { enabled: true }, new Map()),
+      resolveApiKey: async () => 'gsk_test',
+      // A fetch boundary that breaks its contract (resolves to no Response) makes analysis throw.
+      fetchImpl: (async () => null) as unknown as typeof fetch,
+    };
+    const worker = await start(deps);
+    const registered = await worker.registerRepository(repo);
+    const repositoryId = registered.ok ? registered.repository.repositoryId : '';
+    await writeFile(join(repo, 'cart.py'), 'def total(items):\n    return 0\n');
+    await git(repo, ['commit', '-am', 'wip']);
+    await worker.runOnce();
+    await worker.setSettings({
+      enabled: true,
+      remoteAnalysis: {
+        enabled: true,
+        allowedRepositoryIds: [repositoryId],
+        providers: [{ id: 'groq', kind: 'groq', modelId: 'm', billing: 'free', apiKey: { _isSecretValue: true, value: 'gsk_test' } }],
+      },
+    });
+    const snapshot = worker.getSnapshot({});
+    const commit = snapshot.ok ? snapshot.commits[0]! : null;
+
+    const result = await worker.requestCommitAnalysis({ repositoryId, sha: commit!.sha });
+
+    expect(result).toMatchObject({ ok: true, commit: { analysis: { status: 'failed', reason: 'internal_error' } } });
+  });
+
   it('never hands API keys back to clients', async () => {
     const { root } = await setupRepo();
     const worker = await start(buildDeps(root, { enabled: true }, new Map()));

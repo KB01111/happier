@@ -198,7 +198,10 @@ function useCodeIntelligenceSettings(target: MachineTarget | null, phase: string
   const machineId = target?.machineId;
   const targetKey = `${serverId ?? ''}/${machineId ?? ''}`;
   const targetKeyRef = React.useRef(targetKey);
-  targetKeyRef.current = targetKey;
+  // Updated on commit, never during render: a render React discards must not retarget pending saves.
+  React.useLayoutEffect(() => {
+    targetKeyRef.current = targetKey;
+  }, [targetKey]);
   const valueRef = React.useRef<CodeIntelligenceSettingsV1 | null>(null);
   const queueRef = React.useRef<Promise<void>>(Promise.resolve());
   const daemonReachable = phase !== 'loading' && phase !== 'unreachable';
