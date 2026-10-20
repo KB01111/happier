@@ -18,7 +18,7 @@ import type { ObservedProcess } from '@/backends/directSessions/processMatch';
 import { startSingleFlightIntervalLoop, type SingleFlightIntervalLoopHandle } from '@/daemon/lifecycle/singleFlightIntervalLoop';
 import { logger } from '@/ui/logger';
 
-import { analyzeCommit } from './analysis/analyzeCommit';
+import { analyzeCommit, persistCommitAnalysis } from './analysis/analyzeCommit';
 import { observeCheckout } from './commits/observeCheckout';
 import type { ObservedCheckout } from './git/observedGit';
 import { sweepExternalSessions, type ObservedSessionProvider } from './sessions/sweepExternalSessions';
@@ -164,10 +164,13 @@ export async function startCodeIntelligenceWorker(deps: CodeIntelligenceWorkerDe
     } catch (error) {
       // An analysis that throws is closed as failed, never left `analyzing` until the next restart.
       recordError(`analysis of ${commit.sha} failed`, error);
-      activeStore.updateCommitAnalysis({
-        repositoryId: commit.repositoryId,
-        sha: commit.sha,
-        analysis: { ...commit.analysis, status: 'failed', reason: 'internal_error', updatedAtMs: deps.nowMs() },
+      // Builds on the stored state so attempts counted before the throw are kept.
+      const current = activeStore.getCommit({ repositoryId: commit.repositoryId, sha: commit.sha })?.analysis ?? commit.analysis;
+      persistCommitAnalysis({
+        store: activeStore,
+        commit,
+        analysis: { ...current, status: 'failed', reason: 'internal_error', updatedAtMs: deps.nowMs() },
+        kind: 'analysis_failed',
       });
     }
   };

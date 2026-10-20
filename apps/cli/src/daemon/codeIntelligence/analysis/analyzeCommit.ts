@@ -36,6 +36,36 @@ function monthKey(nowMs: number): string {
  * a commit is never dropped because analysis was disabled, rate limited or failed, and a rate
  * limited job stays `queued` with the provider's retry instruction so the worker can resume it.
  */
+type AnalysisEventKind = 'analysis_started' | 'analysis_completed' | 'analysis_failed' | 'analysis_skipped';
+
+/** Records a commit's analysis state together with the activity event that announces it. */
+export function persistCommitAnalysis(input: Readonly<{
+  store: CodeIntelligenceStore;
+  commit: CodeIntelligenceCommitV1;
+  analysis: CodeIntelligenceCommitAnalysisV1;
+  kind: AnalysisEventKind;
+}>): CodeIntelligenceCommitAnalysisV1 {
+  const { store, commit, analysis } = input;
+  store.updateCommitAnalysis({ repositoryId: commit.repositoryId, sha: commit.sha, analysis });
+  store.appendEvent({
+    kind: input.kind,
+    atMs: analysis.updatedAtMs,
+    repositoryId: commit.repositoryId,
+    worktreePath: commit.observedInWorktreePath,
+    sessionId: null,
+    commitSha: commit.sha,
+    data: {
+      status: analysis.status,
+      reason: analysis.reason,
+      providerId: analysis.providerId,
+      modelId: analysis.modelId,
+      riskLevel: analysis.riskLevel,
+      findings: analysis.findings.length,
+    },
+  });
+  return analysis;
+}
+
 export async function analyzeCommit(input: Readonly<{
   store: CodeIntelligenceStore;
   settings: CodeIntelligenceSettingsV1;
@@ -53,26 +83,8 @@ export async function analyzeCommit(input: Readonly<{
     retryAfterMs: null,
     updatedAtMs: deps.nowMs(),
   };
-  const persist = (analysis: CodeIntelligenceCommitAnalysisV1, kind: 'analysis_started' | 'analysis_completed' | 'analysis_failed' | 'analysis_skipped') => {
-    store.updateCommitAnalysis({ repositoryId: commit.repositoryId, sha: commit.sha, analysis });
-    store.appendEvent({
-      kind,
-      atMs: analysis.updatedAtMs,
-      repositoryId: commit.repositoryId,
-      worktreePath: commit.observedInWorktreePath,
-      sessionId: null,
-      commitSha: commit.sha,
-      data: {
-        status: analysis.status,
-        reason: analysis.reason,
-        providerId: analysis.providerId,
-        modelId: analysis.modelId,
-        riskLevel: analysis.riskLevel,
-        findings: analysis.findings.length,
-      },
-    });
-    return analysis;
-  };
+  const persist = (analysis: CodeIntelligenceCommitAnalysisV1, kind: AnalysisEventKind) =>
+    persistCommitAnalysis({ store, commit, analysis, kind });
 
   // Cheap admission first: nothing is read for a remote prompt unless a provider could take it.
   const preflight = selectAnalysisRoute({

@@ -231,6 +231,8 @@ describe('code intelligence worker', () => {
     const result = await worker.requestCommitAnalysis({ repositoryId, sha: commit!.sha });
 
     expect(result).toMatchObject({ ok: true, commit: { analysis: { status: 'failed', reason: 'internal_error' } } });
+    const feed = worker.getSnapshot({});
+    expect(feed.ok && feed.events.at(-1)).toMatchObject({ kind: 'analysis_failed', commitSha: commit!.sha, data: { reason: 'internal_error' } });
   });
 
   it('never hands API keys back to clients', async () => {
