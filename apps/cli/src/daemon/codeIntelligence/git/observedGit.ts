@@ -214,10 +214,16 @@ export function parseNumstatZ(output: string): Map<string, Readonly<{ insertions
 }
 
 /** Null when git could not list the changes; an empty commit yields an empty list. */
+/**
+ * The first `maxFiles` files a commit changed, and how many it changed in all. A listing larger
+ * than git's output cap is still usable: its leading entries are complete, and the total comes from
+ * `--shortstat`, whose output stays small. Null only when git could not answer.
+ */
 export async function readCommitChangedFiles(input: Readonly<{
   worktreePath: string;
   header: CommitHeader;
-}>): Promise<CodeIntelligenceChangedFileV1[] | null> {
+  maxFiles: number;
+}>): Promise<Readonly<{ files: CodeIntelligenceChangedFileV1[]; totalCount: number }> | null> {
   // Merges are compared with their first parent: the changes the merge brought onto the branch.
   const range = input.header.parents.length === 0
     ? ['--root', input.header.sha]
@@ -226,9 +232,17 @@ export async function readCommitChangedFiles(input: Readonly<{
     runObserverGit({ cwd: input.worktreePath, args: ['diff-tree', '-r', '-M', '-z', '--no-commit-id', '--name-status', ...range, '--'] }),
     runObserverGit({ cwd: input.worktreePath, args: ['diff-tree', '-r', '-M', '-z', '--no-commit-id', '--numstat', ...range, '--'] }),
   ]);
-  if (!nameStatus.success) return null;
-  const stats = numstat.success ? parseNumstatZ(numstat.stdout) : new Map();
-  return parseNameStatusZ(nameStatus.stdout).map((entry) => {
+  if (!nameStatus.success && !nameStatus.outputLimitExceeded) return null;
+  const entries = parseNameStatusZ(nameStatus.stdout);
+  let totalCount = entries.length;
+  if (nameStatus.outputLimitExceeded) {
+    const shortstat = await runObserverGit({ cwd: input.worktreePath, args: ['diff-tree', '-r', '-M', '--no-commit-id', '--shortstat', ...range, '--'] });
+    const counted = shortstat.success ? /(\d+) files? changed/.exec(shortstat.stdout) : null;
+    if (!counted) return null;
+    totalCount = Number.parseInt(counted[1]!, 10);
+  }
+  const stats = numstat.success || numstat.outputLimitExceeded ? parseNumstatZ(numstat.stdout) : new Map();
+  const files = entries.slice(0, input.maxFiles).map((entry) => {
     const counts = stats.get(entry.path);
     return {
       path: entry.path,
@@ -239,6 +253,7 @@ export async function readCommitChangedFiles(input: Readonly<{
       binary: counts !== undefined && counts.insertions === null && counts.deletions === null,
     };
   });
+  return { files, totalCount };
 }
 
 export type LineRange = Readonly<{ start: number; end: number }>;

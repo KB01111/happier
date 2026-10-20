@@ -355,7 +355,7 @@ const CommitRow = React.memo(function CommitRow(props: Readonly<{
     <>
       <Item
         title={commit.subject || commit.sha.slice(0, 8)}
-        subtitle={`${commit.sha.slice(0, 8)} · ${t('codeIntelligence.commitDetail', { files: commit.changedFiles.length, symbols: commit.changedSymbols.length })}`}
+        subtitle={`${commit.sha.slice(0, 8)} · ${t('codeIntelligence.commitDetail', { files: commit.changedFileCount ?? commit.changedFiles.length, symbols: commit.changedSymbols.length })}`}
         detail={formatAnalysisState(commit.analysis)}
         icon={<Icon name="git-commit" size={ICON_SIZE.lg} color={riskColor} />}
         onPress={() => setExpanded((value) => !value)}

@@ -1,4 +1,4 @@
-import { execFile as execFileCallback } from 'node:child_process';
+import { execFile as execFileCallback, spawn } from 'node:child_process';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -178,6 +178,26 @@ describe('observeCheckout', () => {
     expect(asked).toEqual([repo]);
     expect(store.listRepositories()).toEqual([]);
   });
+
+  it('records a commit whose file list exceeds git output limits, with its true file count', async () => {
+    const { repo, store } = await setup();
+    await observe(store, repo);
+    // One commit adding 25k files with long paths: its name-status listing is larger than the
+    // SCM runner's output cap, as when a dependency tree is committed.
+    const parent = await git(repo, ['rev-parse', 'HEAD']);
+    const lines = [`commit refs/heads/main\ncommitter Dev <dev@example.com> 1000000000 +0000\ndata 4\nbulk\nfrom ${parent}\n`];
+    for (let index = 0; index < 25_000; index += 1) lines.push(`M 100644 inline lib/${'x'.repeat(190)}/${index}.txt\ndata 0\n`);
+    const importer = spawn('git', ['fast-import', '--quiet'], { cwd: repo, stdio: ['pipe', 'ignore', 'inherit'] });
+    const imported = new Promise<void>((resolve, reject) => importer.on('exit', (code) => (code === 0 ? resolve() : reject(new Error(`fast-import ${code}`)))));
+    importer.stdin.end(`${lines.join('')}\n`);
+    await imported;
+
+    const result = await observe(store, repo);
+
+    expect(result?.newCommits.map((commit) => [commit.subject, commit.changedFiles.length, commit.changedFileCount])).toEqual([['bulk', 500, 25_000]]);
+    // The checkpoint moved past it, so it is not read again.
+    expect((await observe(store, repo))?.newCommits).toEqual([]);
+  }, 60_000);
 
   it('returns null for a directory outside any git repository', async () => {
     const { root, store } = await setup();

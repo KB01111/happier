@@ -99,7 +99,7 @@ export async function buildCommitAnalysisPrompt(input: Readonly<{
   const impact = commit.impactedReferences.map((reference) => `- ${reference.symbolName} is referenced in ${reference.filePath}`);
   const sections = [
     `Commit: ${commit.subject}`,
-    `Files changed: ${commit.changedFiles.length}`,
+    `Files changed: ${commit.changedFileCount ?? commit.changedFiles.length}`,
     symbols.length > 0 ? `Changed symbols (declaration scan, may be incomplete):\n${symbols.join('\n')}` : 'Changed symbols: none recognized',
     impact.length > 0 ? `Other files that textually reference changed symbols:\n${impact.join('\n')}` : '',
     omitted.length > 0 ? `Diff omitted for: ${omitted.join(', ')}` : '',

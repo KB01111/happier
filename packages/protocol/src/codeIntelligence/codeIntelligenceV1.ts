@@ -200,7 +200,10 @@ export const CodeIntelligenceCommitV1Schema = z
     committedAtMs: z.number().int().nonnegative(),
     observedAtMs: z.number().int().nonnegative(),
     parentCount: z.number().int().nonnegative(),
+    /** At most the first recorded files of the commit; `changedFileCount` is the full count. */
     changedFiles: z.array(CodeIntelligenceChangedFileV1Schema),
+    /** How many files the commit changed; absent when `changedFiles` is the complete list. */
+    changedFileCount: z.number().int().nonnegative().optional(),
     changedSymbols: z.array(CodeIntelligenceChangedSymbolV1Schema),
     impactedReferences: z.array(CodeIntelligenceImpactReferenceV1Schema),
     /**
