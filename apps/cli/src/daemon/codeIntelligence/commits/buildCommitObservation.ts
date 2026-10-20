@@ -23,6 +23,12 @@ import { isChangedFileExcluded, isPathExcludedFromIntelligence } from './pathExc
  * simply absent from the deterministic facts (never guessed).
  */
 const MAX_SCANNED_FILES_PER_COMMIT = 40;
+/**
+ * Files recorded per commit. Snapshots resend the recent commits on every poll, so a vendored drop
+ * must not carry its whole listing; 500 entries (~50 KB) is also more than the review prompt's
+ * 48 KiB diff budget can use. The full count is kept in `changedFileCount`.
+ */
+const MAX_RECORDED_FILES_PER_COMMIT = 500;
 /** Larger sources are almost always generated or vendored; declaration scanning them is noise. */
 const MAX_SCANNED_FILE_BYTES = 512 * 1024;
 const MAX_IMPACT_SYMBOLS_PER_COMMIT = 15;
@@ -42,9 +48,10 @@ export async function buildCommitObservation(input: Readonly<{
   // Null means git could not read the commit; the caller keeps its HEAD checkpoint and retries.
   const header = await readCommitHeader({ worktreePath: input.worktreePath, sha: input.sha });
   if (!header) return null;
-  const changedFiles = await readCommitChangedFiles({ worktreePath: input.worktreePath, header });
+  const listing = await readCommitChangedFiles({ worktreePath: input.worktreePath, header, maxFiles: MAX_RECORDED_FILES_PER_COMMIT });
   // A failed read is retried on the next observation instead of storing an empty commit.
-  if (!changedFiles) return null;
+  if (!listing) return null;
+  const changedFiles = listing.files;
   const baseSha = header.parents[0] ?? null;
 
   const scannable = changedFiles
@@ -76,6 +83,7 @@ export async function buildCommitObservation(input: Readonly<{
     observedAtMs: input.nowMs,
     parentCount: header.parents.length,
     changedFiles,
+    ...(listing.totalCount > changedFiles.length ? { changedFileCount: listing.totalCount } : {}),
     changedSymbols,
     impactedReferences,
     plausibleSessionIds: [...input.plausibleSessionIds],

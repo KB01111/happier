@@ -131,7 +131,7 @@ export async function observeCheckout(input: Readonly<{
         data: {
           subject: commit.subject,
           branch: commit.branch,
-          changedFiles: commit.changedFiles.length,
+          changedFiles: commit.changedFileCount ?? commit.changedFiles.length,
           changedSymbols: commit.changedSymbols.length,
           ...(index === 0 && range && range.omittedCount > 0 ? { omittedOlderCommits: range.omittedCount } : {}),
         },
