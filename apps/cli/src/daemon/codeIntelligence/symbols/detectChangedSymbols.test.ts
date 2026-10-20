@@ -126,6 +126,26 @@ describe('detectChangedSymbols', () => {
     }).map((symbol) => [symbol.name, symbol.kind])).toEqual([['TotalAsync', 'method']]);
   });
 
+  it('keeps a body that follows a multi-line signature inside its declaration', () => {
+    const tsOld = 'export function total(\n  items: number[],\n): number {\n  return 1;\n}\n';
+    const tsNew = 'export function total(\n  items: number[],\n): number {\n  return 2;\n}\n';
+    expect(detectChangedSymbols({
+      path: 'total.ts',
+      oldContent: tsOld,
+      newContent: tsNew,
+      hunks: parseZeroContextHunks('@@ -4 +4 @@'),
+    }).map((symbol) => [symbol.name, symbol.changeKind])).toEqual([['total', 'modified']]);
+
+    const pyOld = 'def total(\n    items,\n):\n    return 1\n';
+    const pyNew = 'def total(\n    items,\n):\n    return 2\n';
+    expect(detectChangedSymbols({
+      path: 'total.py',
+      oldContent: pyOld,
+      newContent: pyNew,
+      hunks: parseZeroContextHunks('@@ -4 +4 @@'),
+    }).map((symbol) => [symbol.name, symbol.changeKind])).toEqual([['total', 'modified']]);
+  });
+
   it('reports nothing for languages it cannot scan instead of guessing', () => {
     expect(detectChangedSymbols({
       path: 'README.md',

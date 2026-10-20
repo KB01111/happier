@@ -189,7 +189,9 @@ export function parseNumstatZ(output: string): Map<string, Readonly<{ insertions
       index += 1;
       continue;
     }
-    const [rawInsertions, rawDeletions, inlinePath] = token.split('\t');
+    // With -z the path is written unquoted, so it may itself contain tabs.
+    const [rawInsertions, rawDeletions, ...pathParts] = token.split('\t');
+    const inlinePath = pathParts.join('\t');
     const toCount = (raw: string | undefined) => (raw === '-' || raw === undefined ? null : Number(raw));
     const counts = { insertions: toCount(rawInsertions), deletions: toCount(rawDeletions) };
     if (inlinePath) {

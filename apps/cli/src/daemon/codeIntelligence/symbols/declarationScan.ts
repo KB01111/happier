@@ -148,6 +148,11 @@ function findBlockEnd(lines: readonly string[], startIndex: number, startIndent:
       lastIncluded = index;
       continue;
     }
+    // The closing line of a multi-line signature (`): T {`, `) -> int:`) opens the body.
+    if (indent === startIndent && /^\)/.test(trimmed) && /[{:]$/.test(trimmed)) {
+      lastIncluded = index;
+      continue;
+    }
     if (indent === startIndent && /^[}\])]/.test(trimmed)) lastIncluded = index;
     break;
   }
