@@ -15,7 +15,7 @@ import {
 } from '../git/observedGit';
 import { resolveScannableLanguage } from '../symbols/declarationScan';
 import { detectChangedSymbols } from '../symbols/detectChangedSymbols';
-import { isPathExcludedFromIntelligence } from './pathExclusion';
+import { isChangedFileExcluded, isPathExcludedFromIntelligence } from './pathExclusion';
 
 /**
  * Per-commit work bounds. Each keeps one commit observation to a small, predictable number of
@@ -49,7 +49,7 @@ export async function buildCommitObservation(input: Readonly<{
 
   const scannable = changedFiles
     .filter((file) => !file.binary && resolveScannableLanguage(file.path) !== null)
-    .filter((file) => !isPathExcludedFromIntelligence(file.path, input.excludedPathPrefixes))
+    .filter((file) => !isChangedFileExcluded(file, input.excludedPathPrefixes))
     .slice(0, MAX_SCANNED_FILES_PER_COMMIT);
 
   const changedSymbols: CodeIntelligenceChangedSymbolV1[] = [];

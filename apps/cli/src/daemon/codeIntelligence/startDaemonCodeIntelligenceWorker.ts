@@ -25,7 +25,8 @@ import { startCodeIntelligenceWorker, type CodeIntelligenceWorkerHandle } from '
  */
 export async function startDaemonCodeIntelligenceWorker(): Promise<CodeIntelligenceWorkerHandle> {
   // The same policy that bounds the file browser and terminal bounds what the observer reads:
-  // a checkout is observed only when both its worktree and its git common dir are inside it.
+  // a working directory is asked before git runs in it, and a checkout is observed only when both
+  // its worktree and its git common dir are inside it.
   const accessPolicy = resolveFilesystemAccessPolicy();
   const defaultDirectory = resolveFilesystemPolicyDefaultDirectory({
     defaultDirectory: resolveMachineRpcWorkingDirectory(),
@@ -35,7 +36,7 @@ export async function startDaemonCodeIntelligenceWorker(): Promise<CodeIntellige
     authorizeFilesystemPath({ targetPath, defaultDirectory, accessPolicy }).valid;
 
   return await startCodeIntelligenceWorker({
-    isCheckoutAllowed: (checkout) => isPathAllowed(checkout.worktreePath) && isPathAllowed(checkout.commonDirPath),
+    isPathAllowed,
     dbPath: join(configuration.activeServerDir, 'code-intelligence', 'code-intelligence.sqlite'),
     readSettings: readCodeIntelligenceSettingsFromDisk,
     writeSettings: writeCodeIntelligenceSettingsToDisk,

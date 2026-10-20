@@ -85,11 +85,11 @@ export async function sweepExternalSessions(input: Readonly<{
       : 0;
     // A process proves the agent runs, not which session it serves. It only strengthens recent
     // activity when there are at least as many live agent processes as recently written sessions.
-    const recentlyActiveCount = candidates.filter((candidate) => candidate.activity === 'active_recently').length;
+    const observed = candidates.filter((candidate) => !candidate.archived && nowMs - candidate.updatedAtMs <= OBSERVED_SESSION_RECENCY_WINDOW_MS);
+    const recentlyActiveCount = observed.filter((candidate) => candidate.activity === 'active_recently').length;
     const providerProcessObserved = matchingProcessCount > 0 && matchingProcessCount >= recentlyActiveCount;
 
-    for (const candidate of candidates) {
-      if (candidate.archived || nowMs - candidate.updatedAtMs > OBSERVED_SESSION_RECENCY_WINDOW_MS) continue;
+    for (const candidate of observed) {
       const id = `${provider.providerId}:${candidate.remoteSessionId}`;
       // Only resolved directories are cached; an unresolved one is asked for again next sweep.
       let workingDirectory = input.workingDirectoryCache.get(id) ?? null;

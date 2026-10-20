@@ -111,7 +111,8 @@ export function CodeIntelligenceScreen() {
           title={t('codeIntelligence.title')}
           footer={feed.phase === 'unreachable' ? t('codeIntelligence.unreachable') : t('codeIntelligence.privacyFooter')}
         >
-          {machineItems.length > 1 ? (
+          {/* Offered whenever another machine can be chosen, including away from an offline selection. */}
+          {machineItems.some((item) => item.id !== machineId) ? (
             <DropdownMenu
               open={machineMenuOpen}
               onOpenChange={setMachineMenuOpen}

@@ -48,7 +48,8 @@ const SCRIPT_INTERPRETERS = new Set(['node', 'nodejs', 'bun', 'deno', 'python', 
 
 /**
  * The tokens a matcher inspects: the executable, plus the script it runs when the executable is an
- * interpreter (an npm-installed agent runs as `node …/cli.js`). Other arguments are never matched,
+ * interpreter (an npm-installed agent runs as `node …/cli.js`, possibly after runtime options such as
+ * `--no-warnings`). Other arguments are never matched,
  * so `grep claude server.log` is not an agent. Without a command line (Windows), the process name.
  */
 export function processTokens(process: ObservedProcess): string[] {
@@ -56,5 +57,7 @@ export function processTokens(process: ObservedProcess): string[] {
   const executable = argv[0];
   if (!executable) return [process.name];
   const executableName = stripExecutableSuffix(normalizeSeparators(executable).split('/').pop() ?? '').toLowerCase();
-  return SCRIPT_INTERPRETERS.has(executableName) && argv[1] ? [executable, argv[1]] : [executable];
+  if (!SCRIPT_INTERPRETERS.has(executableName)) return [executable];
+  const script = argv.slice(1).find((arg) => !arg.startsWith('-'));
+  return script ? [executable, script] : [executable];
 }

@@ -14,6 +14,11 @@ describe('direct-session provider process recognition', () => {
     expect(codexDirectSessionProviderOps.matchesProviderProcess?.({ name: 'node', cmd: 'node /usr/lib/node_modules/@openai/codex-linux/bin/codex.js' })).toBe(true);
     expect(codexDirectSessionProviderOps.matchesProviderProcess?.({ name: 'codex.cmd' })).toBe(true);
     expect(openCodeDirectSessionProviderOps.matchesProviderProcess?.({ name: 'opencode' })).toBe(true);
+    // Runtime options before the script do not hide it.
+    expect(claudeDirectSessionProviderOps.matchesProviderProcess?.({
+      name: 'node',
+      cmd: 'node --no-warnings --enable-source-maps /usr/lib/node_modules/@anthropic-ai/claude-code/cli.js',
+    })).toBe(true);
   });
 
   it('does not mistake unrelated or editor-bundled binaries for agents', () => {

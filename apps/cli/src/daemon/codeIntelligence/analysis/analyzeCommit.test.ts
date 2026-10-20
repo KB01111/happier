@@ -202,6 +202,7 @@ describe('analyzeCommit', () => {
       deps: { fetchImpl: scriptedFetch({ 'api.groq.com': () => new Response('null', { status: 200 }) }, []), nowMs: () => NOW, resolveApiKey: () => 'key' },
     });
     expect(nullEnvelope).toMatchObject({ status: 'failed', reason: 'invalid_model_output' });
+    expect(store.getCommit(commit)?.analysis).toMatchObject({ status: 'failed', reason: 'invalid_model_output' });
 
     const keyFailure = await analyzeCommit({
       store,
@@ -242,6 +243,19 @@ describe('analyzeCommit', () => {
     });
     // Without reported usage the full output allowance is charged rather than nothing.
     expect(store.getMonthlySpendUsd({ monthKey: '2026-10' }) - before).toBeGreaterThanOrEqual((2_000 * 15) / 1_000_000);
+
+    // A 200 whose body is not a JSON object was still answered, so it is charged too.
+    for (const body of ['null', '<html>gateway</html>']) {
+      const spentBefore = store.getMonthlySpendUsd({ monthKey: '2026-10' });
+      await analyzeCommit({
+        store,
+        settings,
+        commit: store.getCommit(commit)!,
+        unavailableUntilMsByProviderId: new Map(),
+        deps: { fetchImpl: scriptedFetch({ 'paid.example': () => new Response(body, { status: 200 }) }, []), nowMs: () => NOW, resolveApiKey: () => 'key' },
+      });
+      expect(store.getMonthlySpendUsd({ monthKey: '2026-10' }) - spentBefore).toBeGreaterThanOrEqual((2_000 * 15) / 1_000_000);
+    }
   });
 
   it('fails visibly instead of persisting unvalidated model output', async () => {

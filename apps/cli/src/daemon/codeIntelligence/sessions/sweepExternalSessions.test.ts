@@ -7,6 +7,7 @@ import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { claudeDirectSessionProviderOps } from '@/backends/claude/directSessions/providerOps';
+import type { DirectSessionProviderOps } from '@/backends/directSessions/providerOps';
 
 import { observeCheckout } from '../commits/observeCheckout';
 import { openCodeIntelligenceStore, type CodeIntelligenceStore } from '../store/codeIntelligenceStore';
@@ -112,6 +113,36 @@ describe('process evidence across several sessions', () => {
     await sweep(store, configDir, [{ name: 'claude' }]);
 
     expect(store.listSessions().map((session) => session.status)).toEqual(['active_recently', 'active_recently']);
+  });
+});
+
+describe('process evidence and archived sessions', () => {
+  it('does not let an archived session withhold process evidence from the live one', async () => {
+    const { store, repo } = await setup();
+    const now = Date.now();
+    // Stands in for an agent's own session store, which may list a just-archived session.
+    const ops: DirectSessionProviderOps = {
+      listCandidates: async () => ({
+        nextCursor: null,
+        candidates: [
+          { remoteSessionId: 'live', updatedAtMs: now, activity: 'active_recently' },
+          { remoteSessionId: 'archived', updatedAtMs: now, activity: 'active_recently', archived: true },
+        ],
+      }),
+      getWorkingDirectory: async () => repo,
+      matchesProviderProcess: (process) => process.name === 'agent',
+    };
+
+    await sweepExternalSessions({
+      store,
+      providers: [{ providerId: 'claude', source: { kind: 'claudeConfig', configDir: repo }, ops }],
+      processes: [{ name: 'agent' }],
+      nowMs: now,
+      workingDirectoryCache: new Map(),
+      observeWorkingDirectory: async () => null,
+    });
+
+    expect(store.listSessions().map((session) => [session.providerSessionId, session.status])).toEqual([['live', 'running']]);
   });
 });
 

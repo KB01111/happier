@@ -39,6 +39,9 @@ export function parseRetryAfterMs(value: string | null, nowMs: number): number |
   return Number.isFinite(dateMs) ? Math.max(0, dateMs - nowMs) : null;
 }
 
+/** A request the provider answered but whose usage it did not report; the caller charges the worst case. */
+const UNREPORTED_USAGE = { inputTokens: null, outputTokens: null } as const;
+
 export async function requestChatCompletion(input: Readonly<{
   baseUrl: string;
   apiKey: string | null;
@@ -109,10 +112,10 @@ async function exchange(
   try {
     body = JSON.parse(text);
   } catch {
-    return { ok: false, kind: 'invalid_response', status: response.status, message: 'response was not JSON' };
+    return { ok: false, kind: 'invalid_response', status: response.status, message: 'response was not JSON', billed: UNREPORTED_USAGE };
   }
   if (!body || typeof body !== 'object') {
-    return { ok: false, kind: 'invalid_response', status: response.status, message: 'response was not a JSON object' };
+    return { ok: false, kind: 'invalid_response', status: response.status, message: 'response was not a JSON object', billed: UNREPORTED_USAGE };
   }
   const record = body as { choices?: unknown; usage?: { prompt_tokens?: unknown; completion_tokens?: unknown } | null };
   const firstChoice = Array.isArray(record.choices) ? record.choices[0] as { message?: { content?: unknown } } | null : null;

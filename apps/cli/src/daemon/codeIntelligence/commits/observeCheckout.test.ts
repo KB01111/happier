@@ -131,6 +131,54 @@ describe('observeCheckout', () => {
     expect(commit?.changedSymbols.map((symbol) => [symbol.filePath, symbol.name, symbol.changeKind])).toEqual([['src/cart.ts', 'total', 'added']]);
   });
 
+  it('never scans the old content of a file renamed out of an excluded path', async () => {
+    const { repo, store } = await setup();
+    const observeExcluding = () => observeCheckout({
+      store,
+      cwd: repo,
+      registrationSource: 'session',
+      excludedPathPrefixes: ['secrets/'],
+      resolvePlausibleSessionIds: () => [],
+      nowMs: Date.now,
+    });
+    await mkdir(join(repo, 'secrets'));
+    await writeFile(join(repo, 'secrets', 'keys.ts'), 'export function signingKey(): string {\n  return "a";\n}\n');
+    await git(repo, ['add', '.']);
+    await git(repo, ['commit', '-m', 'add keys']);
+    await observeExcluding();
+
+    await mkdir(join(repo, 'src'));
+    await git(repo, ['mv', 'secrets/keys.ts', 'src/keys.ts']);
+    await writeFile(join(repo, 'src', 'keys.ts'), 'export function signingKey(): string {\n  return "b";\n}\n');
+    await git(repo, ['commit', '-am', 'move keys']);
+    const result = await observeExcluding();
+
+    expect(result?.newCommits[0]?.changedSymbols).toEqual([]);
+  });
+
+  it('asks the filesystem policy about a working directory before running git in it', async () => {
+    const { repo, store } = await setup();
+    const asked: string[] = [];
+
+    const result = await observeCheckout({
+      store,
+      cwd: repo,
+      registrationSource: 'session',
+      excludedPathPrefixes: [],
+      resolvePlausibleSessionIds: () => [],
+      nowMs: Date.now,
+      isPathAllowed: (path) => {
+        asked.push(path);
+        return false;
+      },
+    });
+
+    expect(result).toBeNull();
+    // Refused before the checkout was resolved, so git never ran there.
+    expect(asked).toEqual([repo]);
+    expect(store.listRepositories()).toEqual([]);
+  });
+
   it('returns null for a directory outside any git repository', async () => {
     const { root, store } = await setup();
     expect(await observe(store, root)).toBeNull();

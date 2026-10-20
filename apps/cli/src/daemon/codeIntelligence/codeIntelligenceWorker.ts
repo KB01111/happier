@@ -52,8 +52,8 @@ export type CodeIntelligenceWorkerDeps = Readonly<{
   resolveApiKey: (provider: CodeIntelligenceAnalysisProviderV1) => Promise<string | null>;
   resolveSessionProviders: () => Promise<ObservedSessionProvider[]>;
   listProcesses: () => Promise<ObservedProcess[]>;
-  /** The machine's filesystem access policy, applied to every resolved worktree and git dir. */
-  isCheckoutAllowed?: (checkout: ObservedCheckout) => boolean;
+  /** The machine's filesystem access policy, asked before git runs anywhere and for every resolved checkout. */
+  isPathAllowed?: (path: string) => boolean;
   /** Watches one directory (non-recursively); returns a closer, or null when watching failed. */
   watchDirectory: (path: string, onChange: () => void) => (() => void) | null;
   fetchImpl: typeof fetch;
@@ -145,7 +145,7 @@ export async function startCodeIntelligenceWorker(deps: CodeIntelligenceWorkerDe
       excludedPathPrefixes: settings.excludedPathPrefixes,
       resolvePlausibleSessionIds: plausibleSessionIdsFor(store),
       additionalPlausibleSessionIds,
-      isCheckoutAllowed: deps.isCheckoutAllowed,
+      isPathAllowed: deps.isPathAllowed,
       nowMs: deps.nowMs,
     });
     if (result) ensureWatcher(result.checkout);

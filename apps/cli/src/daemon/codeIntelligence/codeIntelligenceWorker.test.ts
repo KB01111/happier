@@ -152,7 +152,7 @@ describe('code intelligence worker', () => {
 
   it('never registers a checkout the machine filesystem policy refuses', async () => {
     const { root, repo } = await setupRepo();
-    const worker = await start({ ...buildDeps(root, { enabled: true }, new Map()), isCheckoutAllowed: () => false });
+    const worker = await start({ ...buildDeps(root, { enabled: true }, new Map()), isPathAllowed: () => false });
 
     expect(await worker.registerRepository(repo)).toMatchObject({ ok: false });
     const snapshot = worker.getSnapshot({});
@@ -169,14 +169,38 @@ describe('code intelligence worker', () => {
   });
 
   it('shares one review between repeated requests for the same commit', async () => {
-    const { root } = await setupRepo();
-    const worker = await start(buildDeps(root, { enabled: true }, new Map()));
+    const { root, repo } = await setupRepo();
+    let providerCalls = 0;
+    const worker = await start({
+      ...buildDeps(root, { enabled: true }, new Map()),
+      resolveApiKey: async () => 'gsk_test',
+      fetchImpl: (async () => {
+        providerCalls += 1;
+        return new Response('busy', { status: 503 });
+      }) as typeof fetch,
+    });
+    const registered = await worker.registerRepository(repo);
+    const repositoryId = registered.ok ? registered.repository.repositoryId : '';
+    await writeFile(join(repo, 'cart.py'), 'def total(items):\n    return 0\n');
+    await git(repo, ['commit', '-am', 'wip']);
+    await worker.runOnce();
+    await worker.setSettings({
+      enabled: true,
+      remoteAnalysis: {
+        enabled: true,
+        allowedRepositoryIds: [repositoryId],
+        providers: [{ id: 'groq', kind: 'groq', modelId: 'm', billing: 'free', apiKey: { _isSecretValue: true, value: 'gsk_test' } }],
+      },
+    });
+    const snapshot = worker.getSnapshot({});
+    const sha = snapshot.ok ? snapshot.commits[0]!.sha : '';
 
-    const first = worker.requestCommitAnalysis({ repositoryId: 'r', sha: 'a'.repeat(40) });
-    const second = worker.requestCommitAnalysis({ repositoryId: 'r', sha: 'a'.repeat(40) });
+    const first = worker.requestCommitAnalysis({ repositoryId, sha });
+    const second = worker.requestCommitAnalysis({ repositoryId, sha });
 
     expect(second).toBe(first);
-    await first;
+    expect(await first).toMatchObject({ ok: true });
+    expect(providerCalls).toBe(1);
   });
 
   it('closes a manual review that throws as failed instead of leaving it analyzing', async () => {

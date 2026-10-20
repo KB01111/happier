@@ -31,13 +31,18 @@ export async function observeCheckout(input: Readonly<{
   resolvePlausibleSessionIds: (worktreePath: string) => string[];
   /** The session whose sweep triggered this observation, before it is itself stored. */
   additionalPlausibleSessionIds?: readonly string[];
-  /** Filesystem policy for the resolved checkout; a refused checkout is never registered. */
-  isCheckoutAllowed?: (checkout: ObservedCheckout) => boolean;
+  /**
+   * Filesystem policy. The working directory is asked before git runs in it, then the resolved
+   * worktree and git common dir; a refused checkout is never read or registered.
+   */
+  isPathAllowed?: (path: string) => boolean;
   nowMs: () => number;
 }>): Promise<CheckoutObservation | null> {
+  const isPathAllowed = input.isPathAllowed ?? (() => true);
+  if (!isPathAllowed(input.cwd)) return null;
   const checkout = await resolveObservedCheckout({ cwd: input.cwd });
   if (!checkout) return null;
-  if (input.isCheckoutAllowed && !input.isCheckoutAllowed(checkout)) return null;
+  if (!isPathAllowed(checkout.worktreePath) || !isPathAllowed(checkout.commonDirPath)) return null;
   const { store } = input;
   const observedAtMs = input.nowMs();
 

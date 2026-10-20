@@ -1,6 +1,6 @@
 import type { CodeIntelligenceCommitV1 } from '@happier-dev/protocol';
 
-import { isPathExcludedFromIntelligence } from '../commits/pathExclusion';
+import { isChangedFileExcluded } from '../commits/pathExclusion';
 import { readFileDiff } from '../git/observedGit';
 
 /**
@@ -71,8 +71,7 @@ export async function buildCommitAnalysisPrompt(input: Readonly<{
   for (const file of commit.changedFiles) {
     // A rename carries the old side's content too, so either path being excluded excludes the file.
     const excluded = file.binary
-      || isPathExcludedFromIntelligence(file.path, input.excludedPathPrefixes)
-      || (file.previousPath !== null && isPathExcludedFromIntelligence(file.previousPath, input.excludedPathPrefixes));
+      || isChangedFileExcluded(file, input.excludedPathPrefixes);
     // Once the budget is spent no more diffs are read: one git process per remaining file is waste.
     if (excluded || diffBytes >= MAX_PROMPT_DIFF_BYTES) {
       omitted.push(file.path);

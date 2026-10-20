@@ -15,7 +15,7 @@ const DEFAULT_EXCLUDED_SEGMENTS = new Set([
   'Pods',
 ]);
 
-const SECRET_OR_GENERATED_FILE = /(^|\/)(\.env(\..*)?|.*\.pem|.*\.key|id_rsa.*|.*\.p12|.*\.pfx|yarn\.lock|package-lock\.json|pnpm-lock\.yaml|Cargo\.lock|go\.sum|.*\.min\.(js|css))$/i;
+const SECRET_OR_GENERATED_FILE = /(^|\/)(\.env(\..*)?|.*\.pem|.*\.key|id_rsa.*|.*\.p12|.*\.pfx|yarn\.lock|package-lock\.json|pnpm-lock\.yaml|Cargo\.lock|go\.sum|.*\.min\.(js|css))$/is;
 
 // A configured entry is a repository-relative path prefix; `*` (within one segment), `**` (across
 // segments) and `?` make it a glob matched against the start of the path, so `**/secrets/` excludes
@@ -39,7 +39,17 @@ function compileConfiguredExclusion(entry: string): RegExp | null {
     }
   }
   // Prefix semantics, like a plain entry: erring towards excluding more is the safe direction.
-  return new RegExp(`^${pattern}`);
+  // `s`: a path component may contain a line break, which must not end a `**` match.
+  return new RegExp(`^${pattern}`, 's');
+}
+
+/** A changed file is excluded when either side of a rename or copy is. */
+export function isChangedFileExcluded(
+  file: Readonly<{ path: string; previousPath: string | null }>,
+  configuredPrefixes: readonly string[],
+): boolean {
+  return isPathExcludedFromIntelligence(file.path, configuredPrefixes)
+    || (file.previousPath !== null && isPathExcludedFromIntelligence(file.previousPath, configuredPrefixes));
 }
 
 export function isPathExcludedFromIntelligence(path: string, configuredPrefixes: readonly string[]): boolean {
